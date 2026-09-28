@@ -1,4 +1,4 @@
-//! Scene building: hierarchy, skins, animation targets, lights, cameras.
+//! Scene building: hierarchy, skins, morphs, animation targets, lights, cameras.
 
 use crate::error::FbxError;
 use crate::label::FbxAssetLabel;
@@ -7,9 +7,10 @@ use crate::names::{
     animation_name_path, animation_root_typed_ids, is_ancestor_of, node_name_component,
     node_typed_id,
 };
-use crate::types::{FbxSkin, NodeMeshPrimitive};
+use crate::types::{FbxExtras, FbxMeshName, FbxSkin, NodeMeshPrimitive};
 use crate::utils::convert_transform;
 use bevy::asset::{Handle, LoadContext};
+use bevy::mesh::morph::{MeshMorphWeights, MorphWeights};
 use bevy::mesh::skinning::SkinnedMesh;
 use bevy::pbr::StandardMaterial;
 use bevy::prelude::*;
@@ -31,6 +32,8 @@ pub fn build_scene(
     settings: &FbxLoaderSettings,
     load_context: &mut LoadContext,
 ) -> Result<Handle<WorldAsset>, FbxError> {
+    warn_unsupported_features(scene);
+
     let mut world = World::new();
 
     let default_material = materials.first().cloned().unwrap_or_else(|| {
@@ -56,10 +59,18 @@ pub fn build_scene(
             Visibility::Hidden
         };
 
-        let entity = world
-            .spawn((transform, GlobalTransform::default(), visibility, name))
-            .id();
+        let mut entity_cmds = world.spawn((
+            transform,
+            GlobalTransform::default(),
+            visibility,
+            name,
+        ));
 
+        if let Some(extras) = props_to_extras(&u_node.element.props) {
+            entity_cmds.insert(extras);
+        }
+
+        let entity = entity_cmds.id();
         element_to_entity.insert(u_node.element.element_id, entity);
         typed_id_to_entity.insert(node_typed_id(u_node), entity);
     }
@@ -135,6 +146,26 @@ pub fn build_scene(
         };
 
         let skin = skin_data_by_mesh_element.get(&u_node.element.element_id);
+        let neg_scale = {
+            let s = u_node.local_transform.scale;
+            (s.x * s.y * s.z) < 0.0
+        };
+        if neg_scale {
+            warn!(
+                "FBX node '{}' has negative scale; cull inversion for mirrored materials is approximate",
+                u_node.element.name
+            );
+        }
+
+        let mut max_morph = 0usize;
+        let mut morph_weights: Vec<f32> = Vec::new();
+        let mut first_mesh: Option<Handle<Mesh>> = None;
+
+        if !u_node.element.name.is_empty() {
+            world
+                .entity_mut(node_entity)
+                .insert(FbxMeshName(u_node.element.name.to_string()));
+        }
 
         for primitive in primitives {
             let material = named_materials
@@ -152,6 +183,17 @@ pub fn build_scene(
                 Visibility::Inherited,
             ));
 
+            if primitive.morph_target_count > 0 {
+                max_morph = max_morph.max(primitive.morph_target_count);
+                if morph_weights.len() < primitive.morph_weights.len() {
+                    morph_weights = primitive.morph_weights.clone();
+                }
+                if first_mesh.is_none() {
+                    first_mesh = Some(primitive.mesh.clone());
+                }
+                mesh_entity.insert(MeshMorphWeights::Reference(node_entity));
+            }
+
             if let Some(skin) = skin {
                 let mut joints = Vec::with_capacity(skin.joint_element_ids.len());
                 let mut missing = false;
@@ -164,14 +206,6 @@ pub fn build_scene(
                     }
                 }
                 if !missing && !joints.is_empty() {
-                    if joints.len() > 256 {
-                        warn!(
-                            "FBX skin '{}' has {} joints (Bevy max 256); truncating",
-                            skin.name,
-                            joints.len()
-                        );
-                        joints.truncate(256);
-                    }
                     mesh_entity.insert(SkinnedMesh {
                         inverse_bindposes: skin.inverse_bind_matrices.clone(),
                         joints,
@@ -181,6 +215,20 @@ pub fn build_scene(
 
             let mesh_id = mesh_entity.id();
             world.entity_mut(node_entity).add_child(mesh_id);
+        }
+
+        if max_morph > 0 {
+            if morph_weights.len() < max_morph {
+                morph_weights.resize(max_morph, 0.0);
+            }
+            match MorphWeights::new(morph_weights, first_mesh) {
+                Ok(mw) => {
+                    world.entity_mut(node_entity).insert(mw);
+                }
+                Err(e) => {
+                    warn!("Failed to create MorphWeights on '{}': {e}", u_node.element.name);
+                }
+            }
         }
     }
 
@@ -209,6 +257,43 @@ pub fn build_scene(
         load_context.add_labeled_asset(FbxAssetLabel::Scene(0).to_string(), WorldAsset::new(world));
 
     Ok(scene_handle)
+}
+
+fn warn_unsupported_features(scene: &ufbx::Scene) {
+    if !scene.constraints.is_empty() {
+        warn!(
+            "FBX contains {} constraint(s); Bevy has no constraint solver — bake animation in DCC or rely on bake_anim TRS",
+            scene.constraints.len()
+        );
+    }
+}
+
+fn props_to_extras(props: &ufbx::Props) -> Option<FbxExtras> {
+    if props.props.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for prop in props.props.as_ref().iter() {
+        if prop.name.is_empty() {
+            continue;
+        }
+        let value = if !prop.value_str.is_empty() {
+            prop.value_str.to_string()
+        } else {
+            format!(
+                "({},{},{},{})",
+                prop.value_vec4.x, prop.value_vec4.y, prop.value_vec4.z, prop.value_vec4.w
+            )
+        };
+        parts.push(format!("{}={}", prop.name, value));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(FbxExtras {
+            value: parts.join(";"),
+        })
+    }
 }
 
 fn insert_light(mut entity: EntityWorldMut, light: &ufbx::Light) {
@@ -244,7 +329,18 @@ fn insert_light(mut entity: EntityWorldMut, light: &ufbx::Light) {
                 ..Default::default()
             });
         }
-        _ => {}
+        ufbx::LightType::Area => {
+            warn!("FBX area light approximated as PointLight");
+            entity.insert(PointLight {
+                color,
+                intensity: light.intensity as f32 * 1000.0,
+                shadow_maps_enabled: light.cast_shadows,
+                ..Default::default()
+            });
+        }
+        _ => {
+            warn!("Unsupported FBX light type {:?}", light.type_);
+        }
     }
 }
 

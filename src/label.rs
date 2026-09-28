@@ -6,10 +6,24 @@ use bevy::asset::AssetPath;
 pub enum FbxAssetLabel {
     /// `Scene{}`: FBX Scene as a Bevy [`WorldAsset`](bevy::world_serialization::WorldAsset)
     Scene(usize),
-    /// `Mesh{}`: FBX Mesh as a Bevy [`Mesh`](bevy::render::mesh::Mesh)
+    /// `Mesh{}`: parent [`FbxMesh`](crate::FbxMesh) container (glTF-aligned).
     Mesh(usize),
-    /// `Material{}`: FBX material as a Bevy [`StandardMaterial`](bevy::pbr::StandardMaterial)
+    /// `Mesh{}/Primitive{}`: Bevy [`Mesh`](bevy::render::mesh::Mesh) for one
+    /// material-split primitive of a parent FBX mesh (glTF-compatible path).
+    Primitive {
+        /// Index of the parent FBX mesh (one per mesh-bearing node / NURBS).
+        mesh: usize,
+        /// Index of this material-group primitive within that mesh.
+        primitive: usize,
+    },
+    /// `Material{}`: FBX material as [`FbxMaterial`](crate::FbxMaterial)
     Material(usize),
+    /// `Material{}/Standard`: Bevy [`StandardMaterial`](bevy::pbr::StandardMaterial)
+    /// referenced by [`FbxMaterial::material`](crate::FbxMaterial::material)
+    MaterialStandard(usize),
+    /// `Material{} (inverted)`: cull-inverted [`StandardMaterial`](bevy::pbr::StandardMaterial)
+    /// for negative-scale nodes (not wrapped in [`FbxMaterial`](crate::FbxMaterial))
+    MaterialInverted(usize),
     /// `Animation{}`: FBX animation as a Bevy [`AnimationClip`](bevy::animation::AnimationClip)
     Animation(usize),
     /// `Node{}`: Individual FBX node in the scene hierarchy
@@ -29,7 +43,12 @@ impl core::fmt::Display for FbxAssetLabel {
         match self {
             FbxAssetLabel::Scene(index) => write!(f, "Scene{index}"),
             FbxAssetLabel::Mesh(index) => write!(f, "Mesh{index}"),
+            FbxAssetLabel::Primitive { mesh, primitive } => {
+                write!(f, "Mesh{mesh}/Primitive{primitive}")
+            }
             FbxAssetLabel::Material(index) => write!(f, "Material{index}"),
+            FbxAssetLabel::MaterialStandard(index) => write!(f, "Material{index}/Standard"),
+            FbxAssetLabel::MaterialInverted(index) => write!(f, "Material{index} (inverted)"),
             FbxAssetLabel::Animation(index) => write!(f, "Animation{index}"),
             FbxAssetLabel::Node(index) => write!(f, "Node{index}"),
             FbxAssetLabel::Skin(index) => write!(f, "Skin{index}"),

@@ -29,12 +29,15 @@ pub mod utils;
 
 pub use error::FbxError;
 pub use label::FbxAssetLabel;
-pub use loader::{FbxLoader, FbxLoaderSettings};
+pub use loader::{FbxLoader, FbxLoaderSettings, FbxSkinnedMeshBoundsPolicy, FbxSpaceConversion};
 pub use types::*;
 
 pub mod prelude {
     //! Commonly used items.
-    pub use crate::{Fbx, FbxAssetLabel, FbxLoaderSettings, FbxNode, FbxPlugin, FbxSkin, Skeleton};
+    pub use crate::{
+        Fbx, FbxAssetLabel, FbxLoaderSettings, FbxMaterial, FbxMesh, FbxNode, FbxPlugin, FbxSkin,
+        Skeleton,
+    };
 }
 
 /// Plugin adding the FBX loader to an [`App`].
@@ -44,12 +47,18 @@ pub struct FbxPlugin;
 impl Plugin for FbxPlugin {
     fn build(&self, app: &mut App) {
         app.init_asset::<Fbx>()
+            .init_asset::<FbxMesh>()
+            .init_asset::<FbxMaterial>()
             .init_asset::<FbxNode>()
             .init_asset::<FbxSkin>()
             .init_asset::<Skeleton>()
             .register_type::<FbxExtras>()
             .register_type::<FbxMeshName>()
             .register_type::<FbxMaterialName>()
+            .register_type::<FbxSceneName>()
+            .register_type::<FbxSceneExtras>()
+            .register_type::<FbxMeshExtras>()
+            .register_type::<FbxMaterialExtras>()
             .register_asset_loader(FbxLoader);
     }
 }

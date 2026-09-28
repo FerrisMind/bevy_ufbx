@@ -41,6 +41,10 @@ pub struct FbxMeta {
     pub creator: Option<String>,
     pub creation_time: Option<String>,
     pub original_application: Option<String>,
+    /// Original file unit in metres (often `0.01` for Maya cm), before conversion.
+    pub original_unit_meters: f32,
+    /// Geometry bake scale applied by ufbx (`ModifyGeometry`); `1.0` otherwise.
+    pub geometry_scale: f32,
 }
 
 // ============================================================================
@@ -78,19 +82,21 @@ pub struct FbxTexture {
     pub wrap_v: FbxWrapMode,
 }
 
-/// Material representation.
-#[derive(Debug, Clone)]
+/// FBX material container (glTF-style): wraps the Bevy [`StandardMaterial`].
+///
+/// Labeled `Material{N}`. Cull-inverted twins used for negative-scale nodes are
+/// labeled `Material{N} (inverted)` and remain bare [`StandardMaterial`] assets
+/// (not wrapped in [`FbxMaterial`]).
+#[derive(Asset, Debug, Clone, TypePath)]
 pub struct FbxMaterial {
+    /// Index in the FBX material list (`ufbx::Scene::materials`).
+    pub index: usize,
+    /// Display name (FBX name, or `FbxMaterial{index}` when unnamed).
     pub name: String,
-    pub base_color: Color,
-    pub metallic: f32,
-    pub roughness: f32,
-    pub emission: Color,
-    pub normal_scale: f32,
-    pub alpha: f32,
-    pub alpha_cutoff: f32,
-    pub double_sided: bool,
-    pub textures: HashMap<FbxTextureType, FbxTexture>,
+    /// Non-inverted Bevy material used for normal-scale mesh entities.
+    pub material: Handle<StandardMaterial>,
+    /// Optional custom-property extras blob.
+    pub extras: Option<FbxExtras>,
 }
 
 // ============================================================================
@@ -142,16 +148,36 @@ pub struct FbxCamera {
 // Scene Elements
 // ============================================================================
 
+/// One material-group primitive of an [`FbxMesh`] (glTF [`GltfPrimitive`] parity).
+#[derive(Debug, Clone)]
+pub struct FbxPrimitive {
+    pub mesh: Handle<Mesh>,
+    pub material: Option<Handle<StandardMaterial>>,
+    pub extras: Option<FbxExtras>,
+}
+
+/// FBX mesh container (glTF-style): one or more Bevy [`Mesh`] primitives.
+#[derive(Asset, Debug, Clone, TypePath)]
+pub struct FbxMesh {
+    pub index: usize,
+    pub name: String,
+    pub primitives: Vec<FbxPrimitive>,
+    pub extras: Option<FbxExtras>,
+}
+
 /// FBX node with hierarchy.
 #[derive(Asset, Debug, Clone, TypePath)]
 pub struct FbxNode {
     pub index: usize,
     pub name: String,
     pub children: Vec<Handle<FbxNode>>,
-    pub mesh: Option<Handle<Mesh>>,
+    pub mesh: Option<Handle<FbxMesh>>,
     pub skin: Option<Handle<FbxSkin>>,
     pub transform: Transform,
     pub visible: bool,
+    /// True when this node hosts an [`AnimationPlayer`] in the spawned scene.
+    #[cfg(feature = "animation")]
+    pub is_animation_root: bool,
 }
 
 /// FBX skin for skeletal animation.
@@ -166,6 +192,8 @@ pub struct FbxSkin {
     /// Element id of the mesh node this skin belongs to.
     pub mesh_element_id: u32,
     pub inverse_bind_matrices: Handle<SkinnedMeshInverseBindposes>,
+    /// Optional custom-property extras blob (glTF `GltfSkin::extras` parity).
+    pub extras: Option<FbxExtras>,
 }
 
 /// Placeholder for skeleton data.
@@ -184,7 +212,13 @@ pub enum FbxInterpolation {
 #[derive(Debug, Clone)]
 pub struct NodeMeshPrimitive {
     pub mesh: Handle<Mesh>,
+    /// Parent FBX mesh index (for [`crate::FbxAssetLabel::Primitive`]).
+    pub mesh_index: usize,
+    /// Primitive index within the parent mesh (material-group order).
+    pub primitive_index: usize,
     pub material_name: String,
+    /// Index into `ufbx::Scene::materials` / loader material lists (`None` = default).
+    pub material_index: Option<usize>,
     pub geometry_to_node: Mat4,
     /// Number of morph targets on this mesh (0 if none).
     pub morph_target_count: usize,
@@ -209,6 +243,32 @@ pub struct FbxMeshName(pub String);
 #[reflect(Component)]
 pub struct FbxMaterialName(pub String);
 
+/// Scene display name (mirrors glTF scene name components).
+#[derive(Component, Reflect, Debug, Clone)]
+#[reflect(Component)]
+pub struct FbxSceneName(pub String);
+
+/// Scene-level extras blob.
+#[derive(Component, Reflect, Debug, Clone, Default)]
+#[reflect(Component, Default)]
+pub struct FbxSceneExtras {
+    pub value: String,
+}
+
+/// Mesh-primitive extras blob.
+#[derive(Component, Reflect, Debug, Clone, Default)]
+#[reflect(Component, Default)]
+pub struct FbxMeshExtras {
+    pub value: String,
+}
+
+/// Material extras blob on a mesh entity.
+#[derive(Component, Reflect, Debug, Clone, Default)]
+#[reflect(Component, Default)]
+pub struct FbxMaterialExtras {
+    pub value: String,
+}
+
 // ============================================================================
 // Main FBX Asset
 // ============================================================================
@@ -218,16 +278,22 @@ pub struct FbxMaterialName(pub String);
 pub struct Fbx {
     pub scenes: Vec<Handle<WorldAsset>>,
     pub named_scenes: HashMap<Box<str>, Handle<WorldAsset>>,
-    pub meshes: Vec<Handle<Mesh>>,
-    pub named_meshes: HashMap<Box<str>, Handle<Mesh>>,
-    pub materials: Vec<Handle<StandardMaterial>>,
-    pub named_materials: HashMap<Box<str>, Handle<StandardMaterial>>,
+    /// Parent FBX meshes (material-split groups), labeled `Mesh{N}`.
+    pub meshes: Vec<Handle<FbxMesh>>,
+    pub named_meshes: HashMap<Box<str>, Handle<FbxMesh>>,
+    /// Flat list of Bevy [`Mesh`] handles extracted from each [`FbxPrimitive::mesh`].
+    pub primitive_meshes: Vec<Handle<Mesh>>,
+    /// Parent FBX materials (labeled `Material{N}`); use [`.material`](FbxMaterial::material) for [`StandardMaterial`].
+    pub materials: Vec<Handle<FbxMaterial>>,
+    pub named_materials: HashMap<Box<str>, Handle<FbxMaterial>>,
     pub nodes: Vec<Handle<FbxNode>>,
     pub named_nodes: HashMap<Box<str>, Handle<FbxNode>>,
     pub skins: Vec<Handle<FbxSkin>>,
     pub named_skins: HashMap<Box<str>, Handle<FbxSkin>>,
     #[cfg(feature = "animation")]
     pub animations: Vec<Handle<AnimationClip>>,
+    /// Take / anim-stack name → clip (e.g. `"Take 001"`). Prefer this over a
+    /// second asset label — clips are only labeled `Animation{N}`.
     #[cfg(feature = "animation")]
     pub named_animations: HashMap<Box<str>, Handle<AnimationClip>>,
     pub default_scene: Option<Handle<WorldAsset>>,

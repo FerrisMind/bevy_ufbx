@@ -1,5 +1,6 @@
 //! Utility functions for converting between ufbx and Bevy types.
 
+use crate::types::FbxExtras;
 use bevy::math::{Affine2, Mat4};
 use bevy::prelude::*;
 
@@ -54,5 +55,38 @@ pub fn convert_transform(t: &ufbx::Transform) -> Transform {
             t.rotation.w as f32,
         ),
         scale: Vec3::new(t.scale.x as f32, t.scale.y as f32, t.scale.z as f32),
+    }
+}
+
+/// Flatten ufbx **user-defined** custom properties into an [`FbxExtras`] blob
+/// (glTF-style). Built-in / synthetic props are skipped.
+pub(crate) fn props_to_extras(props: &ufbx::Props) -> Option<FbxExtras> {
+    if props.props.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for prop in props.props.as_ref().iter() {
+        if prop.name.is_empty() {
+            continue;
+        }
+        if !prop.flags.has_any(ufbx::PropFlags::USER_DEFINED) {
+            continue;
+        }
+        let value = if !prop.value_str.is_empty() {
+            prop.value_str.to_string()
+        } else {
+            format!(
+                "({},{},{},{})",
+                prop.value_vec4.x, prop.value_vec4.y, prop.value_vec4.z, prop.value_vec4.w
+            )
+        };
+        parts.push(format!("{}={}", prop.name, value));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(FbxExtras {
+            value: parts.join(";"),
+        })
     }
 }

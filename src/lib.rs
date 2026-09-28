@@ -7,13 +7,9 @@
 
 //! Loader for FBX scenes using [`ufbx`](https://github.com/ufbx/ufbx-rust).
 //!
-//! This plugin provides comprehensive FBX file loading support for Bevy, including:
-//! - Mesh geometry with multi-material support
-//! - PBR materials with textures
-//! - Skeletal animation and skinning
-//! - Scene hierarchy with nodes
-//! - Lights and cameras
-//! - Animation clips with curves
+//! Supports meshes, PBR materials, skinned meshes, hierarchical scenes,
+//! lights/cameras, and (with the default `animation` feature) baked
+//! [`AnimationClip`](bevy::animation::AnimationClip)s via `ufbx::bake_anim`.
 
 use bevy::asset::AssetApp;
 use bevy::prelude::*;
@@ -23,6 +19,7 @@ pub mod label;
 pub mod loader;
 pub mod material;
 pub mod mesh;
+pub mod names;
 pub mod node;
 pub mod scene;
 pub mod types;
@@ -48,6 +45,6 @@ impl Plugin for FbxPlugin {
             .init_asset::<FbxNode>()
             .init_asset::<FbxSkin>()
             .init_asset::<Skeleton>()
-            .register_asset_loader(FbxLoader::default());
+            .register_asset_loader(FbxLoader);
     }
 }

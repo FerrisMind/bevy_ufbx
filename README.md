@@ -18,6 +18,8 @@ bevy     = "0.19"
 bevy_ufbx = "0.19"
 ```
 
+The default feature set includes `animation` (pulls in `bevy_animation`). Disable with `default-features = false` if you only need static meshes.
+
 ## Quick start
 
 ```rust
@@ -41,6 +43,19 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
 }
 ```
 
+## Animation
+
+Anim stacks are baked with `ufbx::bake_anim` into labeled [`AnimationClip`](https://docs.rs/bevy/latest/bevy/animation/struct.AnimationClip.html)s. The loader does **not** auto-play; build an `AnimationGraph` in your app (see `examples/animated_mesh_fbx.rs`).
+
+```rust
+use bevy_ufbx::FbxAssetLabel;
+
+let clip = asset_server.load(FbxAssetLabel::Animation(0).from_asset("cube_anim.fbx"));
+let (graph, index) = AnimationGraph::from_clip(clip);
+```
+
+Named takes are also on `Fbx.named_animations` when stacks have names.
+
 ## Loading with custom settings
 
 ```rust
@@ -51,7 +66,8 @@ fn setup(asset_server: Res<AssetServer>) {
         "environment.fbx",
         |s| {
             s.load_cameras = false;
-            s.load_lights  = false;
+            s.load_lights = false;
+            s.load_animations = false;
         },
     );
 }
@@ -59,54 +75,47 @@ fn setup(asset_server: Res<AssetServer>) {
 
 ### `FbxLoaderSettings` fields
 
-| Field                | Type                 | Default                       | Description                                 |
-|----------------------|----------------------|-------------------------------|---------------------------------------------|
-| `load_meshes`        | `RenderAssetUsages`  | `RenderAssetUsages::default()` | Which worlds the mesh is available in       |
-| `load_materials`     | `RenderAssetUsages`  | `RenderAssetUsages::default()` | Which worlds the material is available in   |
-| `load_cameras`       | `bool`               | `true`                        | Import cameras from the FBX                 |
-| `load_lights`        | `bool`               | `true`                        | Import lights from the FBX                  |
-| `include_source`     | `bool`               | `false`                       | Keep raw bytes in the loaded asset          |
-| `convert_coordinates`| `bool`               | `false`                       | Remap axes to Bevy's right-handed Y-up space|
+| Field                 | Type                | Default                       | Description                                              |
+|-----------------------|---------------------|-------------------------------|----------------------------------------------------------|
+| `load_meshes`         | `RenderAssetUsages` | `RenderAssetUsages::default()`| Which worlds the mesh is available in                    |
+| `load_materials`      | `RenderAssetUsages` | `RenderAssetUsages::default()`| Which worlds the material is available in                |
+| `load_cameras`        | `bool`              | `true`                        | Import cameras as inactive `Camera3d`                    |
+| `load_lights`         | `bool`              | `true`                        | Import lights onto nodes                                 |
+| `load_animations`     | `bool`              | `true`                        | Bake anim stacks into `AnimationClip`s                   |
+| `include_source`      | `bool`              | `false`                       | Keep raw bytes on the loaded `Fbx` asset                 |
+| `convert_coordinates` | `bool`              | `true`                        | Remap to Bevy RH Y-up metres via ufbx `LoadOpts`         |
 
 ## Asset labels
 
-Individual sub-assets can be addressed with `#Label` path suffixes:
-
-| Label             | Type                | Description                             |
-|-------------------|---------------------|-----------------------------------------|
-| `Scene{N}`        | `WorldAsset`        | Scene hierarchy (N = scene index)       |
-| `Mesh{N}`         | `Mesh`              | Triangulated mesh                       |
-| `Material{N}`     | `StandardMaterial`  | PBR material                            |
-| `Node{N}`         | `FbxNode`           | Transform node                          |
-| `Skin{N}`         | `FbxSkin`           | Skeletal skin                           |
-| `DefaultMaterial` | `StandardMaterial`  | Fallback material when none is present  |
-
-```rust
-let scene    = asset_server.load::<WorldAsset>("model.fbx#Scene0");
-let mesh     = asset_server.load::<Mesh>("model.fbx#Mesh0");
-let material = asset_server.load::<StandardMaterial>("model.fbx#Material0");
-```
+| Label                        | Type                         | Description                          |
+|------------------------------|------------------------------|--------------------------------------|
+| `Scene{N}`                   | `WorldAsset`                 | Parent hierarchy                     |
+| `Mesh{N}`                    | `Mesh`                       | Triangulated mesh                    |
+| `Material{N}`                | `StandardMaterial`           | PBR material                         |
+| `Animation{N}`               | `AnimationClip`              | Baked take                           |
+| `Node{N}`                    | `FbxNode`                    | Transform node                       |
+| `Skin{N}`                    | `FbxSkin`                    | Skeletal skin                        |
+| `Skin{N}/InverseBindMatrices`| `SkinnedMeshInverseBindposes`| IBM buffer (cluster order)           |
+| `DefaultMaterial`            | `StandardMaterial`           | Fallback material                    |
 
 ## Supported features
 
-- Triangle meshes with positions, normals, and UVs
-- Multi-material meshes (face groups per material)
-- PBR materials (base color, metallic, roughness, normal, emission, AO)
-- Texture mapping, including `.fbm` embedded texture folders
-- Skeletal skinning data (bone weights / bind poses)
-- Scene hierarchy (node transforms)
-- Directional, point, and spot lights
+- Triangle meshes (positions, normals, UVs) with multi-material face groups
+- PBR materials and textures (including `.fbm` folders)
+- Hierarchical `WorldAsset` scenes with `Name`d nodes
+- Skinned meshes: top-4 weights, IBM = `inverse(bind_to_world) * geometry_to_world`
+- Baked skeletal / transform animation (`AnimationPlayer` / `AnimationTarget` / `AnimatedBy`)
+- Directional, point, and spot lights; cameras as inactive `Camera3d`
 
-## Limitations
+## Limitations (non-goals)
 
-- Animation curves are parsed but **not yet forwarded to Bevy's animation system**
-- Cameras are not imported into Bevy camera components
-- NURBS and subdivision surfaces are not supported (ufbx triangulates on load)
+See [NOTES.md](NOTES.md) for the explicit non-goal list (morph/blend shapes, NURBS, upstream Bevy PR, full game wiring).
 
-## Example
+## Examples
 
 ```sh
-cargo run --example load_fbx -- my_model.fbx
+cargo run --example load_fbx -- cube.fbx
+cargo run --example animated_mesh_fbx
 ```
 
 ## License

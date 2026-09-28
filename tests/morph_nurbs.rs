@@ -53,9 +53,9 @@ fn blend_shape_cube_loads_morph_targets() {
     let (mesh_handle, scene) = {
         let fbxs = app.world().resource::<Assets<Fbx>>();
         let fbx = fbxs.get(&fbx_handle).expect("Fbx");
-        assert!(!fbx.meshes.is_empty());
+        assert!(!fbx.primitive_meshes.is_empty());
         (
-            fbx.meshes[0].clone(),
+            fbx.primitive_meshes[0].clone(),
             fbx.default_scene.clone().expect("scene"),
         )
     };

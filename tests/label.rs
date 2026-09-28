@@ -27,9 +27,24 @@ fn test_mesh_label() {
 }
 
 #[test]
-fn test_material_label() {
-    let label = FbxAssetLabel::Material(3);
-    assert_eq!(label.to_string(), "Material3");
+fn test_primitive_label() {
+    let label = FbxAssetLabel::Primitive {
+        mesh: 2,
+        primitive: 1,
+    };
+    assert_eq!(label.to_string(), "Mesh2/Primitive1");
+}
+
+#[test]
+fn test_material_inverted_label() {
+    let label = FbxAssetLabel::MaterialInverted(3);
+    assert_eq!(label.to_string(), "Material3 (inverted)");
+}
+
+#[test]
+fn test_material_standard_label() {
+    let label = FbxAssetLabel::MaterialStandard(3);
+    assert_eq!(label.to_string(), "Material3/Standard");
 }
 
 #[test]

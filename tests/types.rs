@@ -2,7 +2,6 @@
 
 use bevy::prelude::*;
 use bevy_ufbx::types::*;
-use std::collections::HashMap;
 
 #[test]
 fn test_handedness_equality() {
@@ -31,6 +30,8 @@ fn test_fbx_meta_default() {
     assert!(meta.creator.is_none());
     assert!(meta.creation_time.is_none());
     assert!(meta.original_application.is_none());
+    assert_eq!(meta.original_unit_meters, 0.0);
+    assert_eq!(meta.geometry_scale, 0.0);
 }
 
 #[test]
@@ -90,23 +91,61 @@ fn test_fbx_interpolation_equality() {
 #[test]
 fn test_fbx_material_creation() {
     let material = FbxMaterial {
+        index: 0,
         name: "TestMaterial".to_string(),
-        base_color: Color::WHITE,
-        metallic: 0.5,
-        roughness: 0.7,
-        emission: Color::BLACK,
-        normal_scale: 1.0,
-        alpha: 1.0,
-        alpha_cutoff: 0.5,
-        double_sided: false,
-        textures: HashMap::new(),
+        material: Handle::default(),
+        extras: None,
     };
 
+    assert_eq!(material.index, 0);
     assert_eq!(material.name, "TestMaterial");
-    assert_eq!(material.base_color, Color::WHITE);
-    assert_eq!(material.metallic, 0.5);
-    assert_eq!(material.roughness, 0.7);
-    assert!(!material.double_sided);
+    assert!(material.extras.is_none());
+}
+
+#[test]
+fn test_fbx_primitive_creation() {
+    let prim = FbxPrimitive {
+        mesh: Handle::default(),
+        material: Some(Handle::default()),
+        extras: Some(FbxExtras {
+            value: "k=v".to_string(),
+        }),
+    };
+    let mesh = FbxMesh {
+        index: 0,
+        name: "Cube".to_string(),
+        primitives: vec![prim],
+        extras: None,
+    };
+
+    assert_eq!(mesh.primitives.len(), 1);
+    assert!(mesh.primitives[0].material.is_some());
+    assert_eq!(
+        mesh.primitives[0].extras.as_ref().map(|e| e.value.as_str()),
+        Some("k=v")
+    );
+}
+
+#[test]
+fn test_fbx_skin_extras_field() {
+    let skin = FbxSkin {
+        index: 0,
+        name: "Skin_0".to_string(),
+        joints: Vec::new(),
+        joint_element_ids: Vec::new(),
+        mesh_element_id: 0,
+        inverse_bind_matrices: Handle::default(),
+        extras: Some(FbxExtras {
+            value: "foo=bar".to_string(),
+        }),
+    };
+
+    assert_eq!(skin.index, 0);
+    assert_eq!(skin.name, "Skin_0");
+    assert_eq!(
+        skin.extras.as_ref().map(|e| e.value.as_str()),
+        Some("foo=bar")
+    );
 }
 
 #[test]

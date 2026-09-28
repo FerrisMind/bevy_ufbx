@@ -125,8 +125,8 @@ fn skinned_mesh_has_top4_joint_attributes() {
     let mesh_handle = {
         let fbxs = app.world().resource::<Assets<Fbx>>();
         let fbx = fbxs.get(&fbx_handle).expect("Fbx");
-        assert!(!fbx.meshes.is_empty());
-        fbx.meshes[0].clone()
+        assert!(!fbx.primitive_meshes.is_empty());
+        fbx.primitive_meshes[0].clone()
     };
 
     let meshes = app.world().resource::<Assets<Mesh>>();

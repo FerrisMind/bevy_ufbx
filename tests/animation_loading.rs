@@ -69,8 +69,9 @@ fn cube_anim_loads_animation_clip_label() {
         "Fbx.animations should list baked clips"
     );
     assert!(
-        !fbx.named_animations.is_empty(),
-        "named_animations should map take names to clips"
+        fbx.named_animations.contains_key("Take 001"),
+        "named_animations should map take name 'Take 001' (got keys: {:?})",
+        fbx.named_animations.keys().collect::<Vec<_>>()
     );
 }
 

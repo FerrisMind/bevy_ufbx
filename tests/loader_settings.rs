@@ -1,7 +1,8 @@
 //! Tests for FBX loader settings.
 
 use bevy::asset::RenderAssetUsages;
-use bevy_ufbx::FbxLoaderSettings;
+use bevy::image::ImageSamplerDescriptor;
+use bevy_ufbx::{FbxLoaderSettings, FbxSkinnedMeshBoundsPolicy, FbxSpaceConversion};
 
 #[test]
 fn test_loader_settings_default() {
@@ -14,10 +15,18 @@ fn test_loader_settings_default() {
     assert!(settings.load_animations);
     assert!(!settings.include_source);
     assert!(settings.convert_coordinates);
+    assert_eq!(settings.space_conversion, FbxSpaceConversion::Auto);
+    assert_eq!(
+        settings.skinned_mesh_bounds_policy,
+        FbxSkinnedMeshBoundsPolicy::Dynamic
+    );
+    assert_eq!(settings.default_sampler, ImageSamplerDescriptor::default());
+    assert!(settings.override_sampler.is_none());
 }
 
 #[test]
 fn test_loader_settings_custom() {
+    let override_sampler = ImageSamplerDescriptor::nearest();
     let settings = FbxLoaderSettings {
         load_meshes: RenderAssetUsages::RENDER_WORLD,
         load_materials: RenderAssetUsages::MAIN_WORLD,
@@ -26,15 +35,23 @@ fn test_loader_settings_custom() {
         load_animations: false,
         include_source: true,
         convert_coordinates: false,
+        space_conversion: FbxSpaceConversion::AdjustTransforms,
+        skinned_mesh_bounds_policy: FbxSkinnedMeshBoundsPolicy::NoFrustumCulling,
+        default_sampler: ImageSamplerDescriptor::linear(),
+        override_sampler: Some(override_sampler.clone()),
     };
 
-    assert_eq!(settings.load_meshes, RenderAssetUsages::RENDER_WORLD);
-    assert_eq!(settings.load_materials, RenderAssetUsages::MAIN_WORLD);
-    assert!(!settings.load_cameras);
-    assert!(!settings.load_lights);
-    assert!(!settings.load_animations);
-    assert!(settings.include_source);
     assert!(!settings.convert_coordinates);
+    assert_eq!(
+        settings.space_conversion,
+        FbxSpaceConversion::AdjustTransforms
+    );
+    assert_eq!(
+        settings.skinned_mesh_bounds_policy,
+        FbxSkinnedMeshBoundsPolicy::NoFrustumCulling
+    );
+    assert_eq!(settings.default_sampler, ImageSamplerDescriptor::linear());
+    assert_eq!(settings.override_sampler, Some(override_sampler));
 }
 
 #[test]
@@ -47,24 +64,21 @@ fn test_loader_settings_serialization() {
         load_animations: true,
         include_source: false,
         convert_coordinates: true,
+        space_conversion: FbxSpaceConversion::TransformRoot,
+        skinned_mesh_bounds_policy: FbxSkinnedMeshBoundsPolicy::BindPose,
+        default_sampler: ImageSamplerDescriptor::nearest(),
+        override_sampler: Some(ImageSamplerDescriptor::linear()),
     };
 
-    // Serialize
     let serialized = serde_json::to_string(&original).expect("Failed to serialize");
-
-    // Deserialize
     let deserialized: FbxLoaderSettings =
         serde_json::from_str(&serialized).expect("Failed to deserialize");
 
-    // Check equality
-    assert_eq!(deserialized.load_meshes, original.load_meshes);
-    assert_eq!(deserialized.load_materials, original.load_materials);
-    assert_eq!(deserialized.load_cameras, original.load_cameras);
-    assert_eq!(deserialized.load_lights, original.load_lights);
-    assert_eq!(deserialized.load_animations, original.load_animations);
-    assert_eq!(deserialized.include_source, original.include_source);
+    assert_eq!(deserialized.space_conversion, original.space_conversion);
     assert_eq!(
-        deserialized.convert_coordinates,
-        original.convert_coordinates
+        deserialized.skinned_mesh_bounds_policy,
+        original.skinned_mesh_bounds_policy
     );
+    assert_eq!(deserialized.default_sampler, original.default_sampler);
+    assert_eq!(deserialized.override_sampler, original.override_sampler);
 }

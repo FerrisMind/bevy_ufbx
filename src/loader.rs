@@ -7,6 +7,7 @@ use crate::node::process_nodes_and_skins;
 use crate::scene::build_scene;
 use crate::types::{Fbx, FbxAxisSystem, FbxMeta, Handedness};
 use bevy::asset::{AssetLoader, LoadContext, RenderAssetUsages, io::Reader};
+use bevy::image::ImageSamplerDescriptor;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -29,9 +30,66 @@ pub struct FbxLoaderSettings {
     pub load_animations: bool,
     /// Whether to keep raw FBX bytes on the [`Fbx`] asset.
     pub include_source: bool,
-    /// When true, force remapping into Bevy's right-handed Y-up metres space
-    /// (always applied via ufbx `LoadOpts` today; kept for API compatibility).
+    /// When true, remap into Bevy right-handed Y-up metres via ufbx `LoadOpts`.
     pub convert_coordinates: bool,
+    /// How unit/axis conversion is applied when [`Self::convert_coordinates`] is set.
+    ///
+    /// Default [`FbxSpaceConversion::Auto`] picks Maya-friendly `ModifyGeometry` or
+    /// Blender-friendly `AdjustTransforms` from the file exporter metadata.
+    pub space_conversion: FbxSpaceConversion,
+    /// Bounds / frustum-culling policy for skinned meshes (mirrors glTF).
+    pub skinned_mesh_bounds_policy: FbxSkinnedMeshBoundsPolicy,
+    /// Base sampler for textures. FBX wrap modes are applied on top unless
+    /// [`Self::override_sampler`] is set.
+    pub default_sampler: ImageSamplerDescriptor,
+    /// When set, ignore FBX wrap modes and use this sampler for every texture.
+    pub override_sampler: Option<ImageSamplerDescriptor>,
+}
+
+/// How ufbx applies unit/axis conversion when coordinate conversion is enabled.
+///
+/// See <https://ufbx.github.io/docs/nodes/#coordinate-spaces>.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum FbxSpaceConversion {
+    /// Pick strategy from the file exporter (Blender → adjust transforms, else modify geometry).
+    #[default]
+    Auto,
+    /// Bake unit scale into geometry; axis fix still adjusts transforms.
+    /// Best for Maya / cm-baked meshes (Mixamo, many DCC exports).
+    ModifyGeometry,
+    /// Fold conversion into node TRS (often leaves `scale = 0.01` on Maya roots).
+    /// Prefer for Blender FBX that applied root `×100` on export.
+    AdjustTransforms,
+    /// Put the whole conversion on the scene root node only.
+    TransformRoot,
+}
+
+impl FbxSpaceConversion {
+    fn resolve(self, exporter: ufbx::Exporter) -> ufbx::SpaceConversion {
+        match self {
+            Self::Auto => match exporter {
+                ufbx::Exporter::BlenderBinary | ufbx::Exporter::BlenderAscii => {
+                    ufbx::SpaceConversion::AdjustTransforms
+                }
+                _ => ufbx::SpaceConversion::ModifyGeometry,
+            },
+            Self::ModifyGeometry => ufbx::SpaceConversion::ModifyGeometry,
+            Self::AdjustTransforms => ufbx::SpaceConversion::AdjustTransforms,
+            Self::TransformRoot => ufbx::SpaceConversion::TransformRoot,
+        }
+    }
+}
+
+/// Controls bounds components on skinned mesh entities (same roles as glTF).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum FbxSkinnedMeshBoundsPolicy {
+    /// Bind-pose mesh AABB only (Bevy default mesh AABB).
+    BindPose,
+    /// Dynamic skinned bounds (follow animation).
+    #[default]
+    Dynamic,
+    /// Bind-pose AABB plus disable frustum culling.
+    NoFrustumCulling,
 }
 
 impl Default for FbxLoaderSettings {
@@ -44,6 +102,10 @@ impl Default for FbxLoaderSettings {
             load_animations: true,
             include_source: false,
             convert_coordinates: true,
+            space_conversion: FbxSpaceConversion::Auto,
+            skinned_mesh_bounds_policy: FbxSkinnedMeshBoundsPolicy::Dynamic,
+            default_sampler: ImageSamplerDescriptor::default(),
+            override_sampler: None,
         }
     }
 }
@@ -73,19 +135,41 @@ impl AssetLoader for FbxLoader {
             return Err(FbxError::InvalidData("FBX file too small".to_string()));
         }
 
+        let exporter = {
+            let probe = ufbx::load_memory(
+                &bytes,
+                ufbx::LoadOpts {
+                    ignore_all_content: true,
+                    ..Default::default()
+                },
+            )
+            .map_err(|e| FbxError::UfbxError(format!("{e:?}")))?;
+            probe.metadata.exporter
+        };
+        let is_blender = matches!(
+            exporter,
+            ufbx::Exporter::BlenderBinary | ufbx::Exporter::BlenderAscii
+        );
+
         let load_opts = if settings.convert_coordinates {
+            let space_conversion = settings.space_conversion.resolve(exporter);
             ufbx::LoadOpts {
                 target_unit_meters: 1.0,
                 target_axes: ufbx::CoordinateAxes::right_handed_y_up(),
-                space_conversion: ufbx::SpaceConversion::AdjustTransforms,
+                target_camera_axes: ufbx::CoordinateAxes::right_handed_y_up(),
+                target_light_axes: ufbx::CoordinateAxes::right_handed_y_up(),
+                space_conversion,
                 geometry_transform_handling: ufbx::GeometryTransformHandling::HelperNodes,
                 inherit_mode_handling: ufbx::InheritModeHandling::Compensate,
                 generate_missing_normals: true,
+                // Blender exporter (Auto also resolves to AdjustTransforms for these files).
+                use_blender_pbr_material: is_blender,
                 ..Default::default()
             }
         } else {
             ufbx::LoadOpts {
                 generate_missing_normals: true,
+                use_blender_pbr_material: is_blender,
                 ..Default::default()
             }
         };
@@ -94,16 +178,29 @@ impl AssetLoader for FbxLoader {
             .map_err(|e| FbxError::UfbxError(format!("{e:?}")))?;
         let scene: &ufbx::Scene = &root;
 
-        let processed_meshes = process_meshes(scene, settings, load_context)?;
-
-        let (materials, named_materials) = if !settings.load_materials.is_empty() {
+        // Materials before meshes so [`FbxPrimitive`] can store material handles.
+        let processed_materials = if !settings.load_materials.is_empty() {
             process_materials(scene, settings, load_context)?
         } else {
-            (Vec::new(), HashMap::new())
+            crate::material::ProcessedMaterials {
+                materials: Vec::new(),
+                named_materials: HashMap::new(),
+                standard_materials: Vec::new(),
+                named_standard_materials: HashMap::new(),
+                inverted_materials: Vec::new(),
+            }
         };
 
+        let processed_meshes = process_meshes(
+            scene,
+            settings,
+            load_context,
+            &processed_materials.standard_materials,
+            &processed_materials.named_standard_materials,
+        )?;
+
         let processed_nodes =
-            process_nodes_and_skins(scene, &processed_meshes.node_meshes, load_context)?;
+            process_nodes_and_skins(scene, &processed_meshes.node_fbx_meshes, load_context)?;
 
         #[cfg(feature = "animation")]
         let processed_anims = if settings.load_animations {
@@ -123,8 +220,9 @@ impl AssetLoader for FbxLoader {
         let scene_handle = build_scene(
             scene,
             &processed_meshes.node_meshes,
-            &materials,
-            &named_materials,
+            &processed_materials.standard_materials,
+            &processed_materials.named_standard_materials,
+            &processed_materials.inverted_materials,
             &processed_nodes.skin_data_by_mesh_element,
             has_animations,
             settings,
@@ -141,6 +239,8 @@ impl AssetLoader for FbxLoader {
                     .to_string();
                 if s.is_empty() { None } else { Some(s) }
             },
+            original_unit_meters: scene.settings.original_unit_meters as f32,
+            geometry_scale: scene.metadata.geometry_scale as f32,
         };
 
         let (axis_system, unit_scale) = if settings.convert_coordinates {
@@ -171,13 +271,23 @@ impl AssetLoader for FbxLoader {
             None
         };
 
+        let mut named_scenes = HashMap::new();
+        let root_name = scene.root_node.element.name.to_string();
+        let scene_name = if root_name.is_empty() {
+            "Scene0".to_string()
+        } else {
+            root_name
+        };
+        named_scenes.insert(Box::from(scene_name.as_str()), scene_handle.clone());
+
         Ok(Fbx {
             scenes: vec![scene_handle.clone()],
-            named_scenes: HashMap::new(),
+            named_scenes,
             meshes: processed_meshes.meshes,
             named_meshes: processed_meshes.named_meshes,
-            materials,
-            named_materials,
+            primitive_meshes: processed_meshes.primitive_meshes,
+            materials: processed_materials.materials,
+            named_materials: processed_materials.named_materials,
             nodes: processed_nodes.nodes,
             named_nodes: processed_nodes.named_nodes,
             skins: processed_nodes.skins,

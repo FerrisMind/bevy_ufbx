@@ -57,13 +57,7 @@ pub fn animation_root_typed_ids(scene: &ufbx::Scene) -> Vec<u32> {
             .nodes
             .as_ref()
             .iter()
-            .filter(|n| {
-                !n.is_root
-                    && n.parent
-                        .as_ref()
-                        .map(|p| p.is_root)
-                        .unwrap_or(false)
-            })
+            .filter(|n| !n.is_root && n.parent.as_ref().map(|p| p.is_root).unwrap_or(false))
             .map(|n| node_typed_id(n))
             .collect()
     } else {

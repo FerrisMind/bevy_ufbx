@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use bevy::animation::AnimationClip;
 use bevy::asset::{AssetPlugin, AssetServer, LoadState};
-use bevy::mesh::skinning::SkinnedMeshInverseBindposes;
 use bevy::mesh::VertexAttributeValues;
+use bevy::mesh::skinning::SkinnedMeshInverseBindposes;
 use bevy::prelude::*;
 use bevy::world_serialization::WorldAsset;
 use bevy_ufbx::{Fbx, FbxAssetLabel, FbxPlugin, FbxSkin};
@@ -76,7 +76,9 @@ fn rigged_triangle_loads_skin_and_ibm() {
     };
 
     let _ = skin_handle;
-    let ibms = app.world().resource::<Assets<SkinnedMeshInverseBindposes>>();
+    let ibms = app
+        .world()
+        .resource::<Assets<SkinnedMeshInverseBindposes>>();
     let ibm = ibms.get(&ibm_handle).expect("Skin0/InverseBindMatrices");
     assert_eq!(ibm.len(), joint_count, "IBM count must equal joint count");
 }
@@ -98,7 +100,9 @@ fn labeled_ibm_asset_resolves() {
         "rigged_triangle.fbx failed to load"
     );
 
-    let ibms = app.world().resource::<Assets<SkinnedMeshInverseBindposes>>();
+    let ibms = app
+        .world()
+        .resource::<Assets<SkinnedMeshInverseBindposes>>();
     assert!(
         ibms.get(&ibm_handle).is_some(),
         "Skin0/InverseBindMatrices label should resolve"

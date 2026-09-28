@@ -5,9 +5,9 @@ use crate::label::FbxAssetLabel;
 use crate::loader::FbxLoaderSettings;
 use crate::utils::convert_texture_uv_transform;
 use bevy::asset::{Handle, LoadContext};
+use bevy::material::AlphaMode;
 use bevy::pbr::StandardMaterial;
 use bevy::prelude::*;
-use bevy::material::AlphaMode;
 use std::collections::HashMap;
 
 type MaterialHandles = (
@@ -76,10 +76,12 @@ pub fn process_textures(
             if is_absolute {
                 // Extract relative path from absolute path
                 // Look for .fbm folder (FBX's standard embedded texture directory)
-                if let Some(fbm_pos) = filename.rfind(".fbm/").or_else(|| filename.rfind(".fbm\\")) {
+                if let Some(fbm_pos) = filename.rfind(".fbm/").or_else(|| filename.rfind(".fbm\\"))
+                {
                     // Find the start of the .fbm folder name
                     let before_fbm = &filename[..fbm_pos];
-                    let folder_start = before_fbm.rfind(&['/', '\\'][..])
+                    let folder_start = before_fbm
+                        .rfind(&['/', '\\'][..])
                         .map(|p| p + 1)
                         .unwrap_or(0);
                     // Extract from folder name onwards: "model.fbm/texture.jpg"
@@ -103,7 +105,8 @@ pub fn process_textures(
             // Look for .fbm folder
             if let Some(fbm_pos) = abs_path.rfind(".fbm/").or_else(|| abs_path.rfind(".fbm\\")) {
                 let before_fbm = &abs_path[..fbm_pos];
-                let folder_start = before_fbm.rfind(&['/', '\\'][..])
+                let folder_start = before_fbm
+                    .rfind(&['/', '\\'][..])
                     .map(|p| p + 1)
                     .unwrap_or(0);
                 &abs_path[folder_start..]
@@ -121,10 +124,7 @@ pub fn process_textures(
         };
 
         if !relative_path.is_empty() {
-            let texture_path = fbx_dir
-                .join(relative_path)
-                .to_string_lossy()
-                .to_string();
+            let texture_path = fbx_dir.join(relative_path).to_string_lossy().to_string();
 
             let image_handle = load_context.load(texture_path);
             texture_handles.insert(texture.element.element_id, image_handle);

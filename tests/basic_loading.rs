@@ -9,7 +9,11 @@ fn test_plugin_builds() {
     app.add_plugins(FbxPlugin);
 
     // Plugin registered without panic.
-    assert!(app.world().get_resource::<Assets<bevy_ufbx::Fbx>>().is_some());
+    assert!(
+        app.world()
+            .get_resource::<Assets<bevy_ufbx::Fbx>>()
+            .is_some()
+    );
 }
 
 #[test]
@@ -19,7 +23,19 @@ fn test_loader_registration() {
     app.add_plugins(AssetPlugin::default());
     app.add_plugins(FbxPlugin);
 
-    assert!(app.world().get_resource::<Assets<bevy_ufbx::Fbx>>().is_some());
-    assert!(app.world().get_resource::<Assets<bevy_ufbx::FbxNode>>().is_some());
-    assert!(app.world().get_resource::<Assets<bevy_ufbx::FbxSkin>>().is_some());
+    assert!(
+        app.world()
+            .get_resource::<Assets<bevy_ufbx::Fbx>>()
+            .is_some()
+    );
+    assert!(
+        app.world()
+            .get_resource::<Assets<bevy_ufbx::FbxNode>>()
+            .is_some()
+    );
+    assert!(
+        app.world()
+            .get_resource::<Assets<bevy_ufbx::FbxSkin>>()
+            .is_some()
+    );
 }

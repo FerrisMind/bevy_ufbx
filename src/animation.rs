@@ -4,7 +4,7 @@ use crate::error::FbxError;
 use crate::label::FbxAssetLabel;
 use crate::names::animation_name_path;
 use bevy::animation::prelude::AnimatableCurve;
-use bevy::animation::{animated_field, AnimationClip, AnimationTargetId};
+use bevy::animation::{AnimationClip, AnimationTargetId, animated_field};
 use bevy::asset::{Handle, LoadContext};
 use bevy::math::curve::{ConstantCurve, Interval, UnevenSampleAutoCurve};
 use bevy::prelude::*;
@@ -78,10 +78,7 @@ pub fn process_animations(
             } else if baked_node.translation_keys.len() >= 2 {
                 let samples = baked_node.translation_keys.iter().map(|k| {
                     let v = k.value;
-                    (
-                        k.time as f32,
-                        Vec3::new(v.x as f32, v.y as f32, v.z as f32),
-                    )
+                    (k.time as f32, Vec3::new(v.x as f32, v.y as f32, v.z as f32))
                 });
                 if let Ok(curve) = UnevenSampleAutoCurve::new(samples) {
                     clip.add_curve_to_target(
@@ -141,8 +138,8 @@ pub fn process_animations(
             }
         }
 
-        let handle = load_context
-            .add_labeled_asset(FbxAssetLabel::Animation(stack_index).to_string(), clip);
+        let handle =
+            load_context.add_labeled_asset(FbxAssetLabel::Animation(stack_index).to_string(), clip);
         named_animations.insert(Box::from(take_name.as_str()), handle.clone());
         animations.push(handle);
     }

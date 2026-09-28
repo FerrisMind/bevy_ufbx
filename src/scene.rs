@@ -57,12 +57,7 @@ pub fn build_scene(
         };
 
         let entity = world
-            .spawn((
-                transform,
-                GlobalTransform::default(),
-                visibility,
-                name,
-            ))
+            .spawn((transform, GlobalTransform::default(), visibility, name))
             .id();
 
         element_to_entity.insert(u_node.element.element_id, entity);

@@ -32,10 +32,7 @@ fn collect_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if !SKIP_DIRS.contains(&name) {
                 collect_recursive(&path, out);
             }
@@ -104,7 +101,9 @@ fn load_all_ufbx_test_data() {
         Ok(dir) => PathBuf::from(dir),
         Err(_) => {
             println!("Skipping: UFBX_TEST_DATA env var not set.");
-            println!("To run: UFBX_TEST_DATA=/path/to/ufbx/data cargo test load_all_ufbx_test_data -- --nocapture");
+            println!(
+                "To run: UFBX_TEST_DATA=/path/to/ufbx/data cargo test load_all_ufbx_test_data -- --nocapture"
+            );
             return;
         }
     };
@@ -122,7 +121,11 @@ fn load_all_ufbx_test_data() {
         data_dir.display()
     );
 
-    println!("Found {} FBX files in {}\n", fbx_files.len(), data_dir.display());
+    println!(
+        "Found {} FBX files in {}\n",
+        fbx_files.len(),
+        data_dir.display()
+    );
 
     let mut passed = 0usize;
     let mut failures: Vec<String> = Vec::new();

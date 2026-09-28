@@ -89,9 +89,10 @@ fn test_multiple_plugins() {
 
     // Verify resources exist
     assert!(app.world().get_resource::<Assets<Mesh>>().is_some());
-    assert!(app
-        .world()
-        .get_resource::<Assets<StandardMaterial>>()
-        .is_some());
+    assert!(
+        app.world()
+            .get_resource::<Assets<StandardMaterial>>()
+            .is_some()
+    );
     assert!(app.world().get_resource::<Assets<Fbx>>().is_some());
 }

@@ -1,40 +1,46 @@
 # bevy_ufbx NOTES
 
-Working notes for the forked loader in `tir_refs/fbx` (glTF character parity on Bevy 0.19).
+Forked loader in `tir_refs/fbx` aiming at **Bevy glTF-class FBX parity** (Bevy 0.19 + ufbx 0.9).
 
-## Done (parity target)
+## Parity bar
 
-- Hierarchy `WorldAsset` with parented `Name`d nodes and geometry offsets
-- `SkinnedMesh` + IBM label `Skin{i}/InverseBindMatrices`
-- IBM formula: `inverse(cluster.bind_to_world) * cluster.geometry_to_world`
-- Joint / vertex weight indices follow cluster order; top-4 by magnitude, renormalized
-- `ufbx::bake_anim` → labeled `AnimationClip`s (`Animation{i}`) + `Fbx.named_animations`
-- Path-root policy A: animation name paths start under the synthetic ufbx root (Mixamo-friendly)
-- `AnimationPlayer` on animation roots; `AnimationTarget` + `AnimatedBy` on the path
-- Materials, lights, inactive cameras; `load_animations` / `convert_coordinates` / `include_source`
-- Fixtures: `assets/cube_anim.fbx`, `assets/rigged_triangle.fbx`
-- Example: `examples/animated_mesh_fbx.rs` (app builds `AnimationGraph`; loader does not auto-play)
+Match what `bevy_gltf` exposes at runtime, fed by ufbx — not 1:1 Autodesk FBX fidelity.
+
+## Implemented
+
+- Hierarchy `WorldAsset`, skins + IBM, bake_anim TRS + morph `WeightsCurve`
+- Mesh attrs: color, tangent (or generated), UV0/UV1
+- Blend shapes → morph targets + `MorphWeights` / `MeshMorphWeights`
+- Embedded textures + wrap modes; richer PBR factors (coat/transmission/IOR)
+- NURBS → tessellate to `Mesh`
+- Constraint / non-linear skinning: warn and continue
+- Honest `axis_system` / `unit_scale` when `convert_coordinates: false`
+- `FbxExtras`, `FbxMeshName` components
+
+## Engine-impossible / bake-only
+
+| FBX feature | Behavior |
+|-------------|----------|
+| Constraints / IK | Warning; bake TRS in DCC / bake_anim |
+| Dual-quaternion skin | Warning; LBS approximation |
+| Native NURBS | Tessellate only |
+| Stereo / character / audio | Ignored |
+| GPU instancing | Shared mesh handles only |
+
+## LoadOpts (when `convert_coordinates`)
+
+RH Y-up, metres, `AdjustTransforms`, `HelperNodes`, `InheritModeHandling::Compensate`.
+
+**Units caveat:** Maya/ufbx fixtures often have `unit_meters = 0.01` (cm). With `AdjustTransforms`, mesh vertex AABB stays in file units (e.g. ±0.5) while the **node local scale** becomes `0.01`, so the world-space cube is **~1 cm**. Examples that need a metre-sized subject must root-scale by `~100` (see `examples/morph_fbx.rs`).
+
+## Fixtures
+
+- `assets/cube_anim.fbx` — transform take
+- `assets/rigged_triangle.fbx` — skin
+- `assets/blend_shape_cube.fbx` — morphs
+- `assets/nurbs_saddle.fbx` — NURBS tessellate
 
 ## Non-goals
 
-- Morph / blend shapes
-- NURBS / subdivision surfaces (ufbx may triangulate some cases; not a dedicated path)
-- Landing this as a bevyengine upstream PR
-- Full T.I.R. game wiring (character controller, animation graphs for combat, etc.)
-- Raw-curve FBX fallback that binds every curve to the first named node (rejected; broken)
-
-## LoadOpts contract
-
-When `convert_coordinates` is true (default):
-
-- RH Y-up, metres (`target_unit_meters: 1.0`)
-- `SpaceConversion::AdjustTransforms`
-- `GeometryTransformHandling::HelperNodes`
-- `InheritModeHandling::Compensate`
-
-## Remaining caveats
-
-- Delivery / courier fees and game-side retargeting are out of scope
-- Very large skins (>256 joints) are truncated with a warning
-- `FbxMeta` fills creator when present; other metadata fields stay optional stubs
-- Coordinate conversion off (`convert_coordinates: false`) uses bare ufbx defaults — axis systems may not match Bevy
+- Forking / upstreaming into bevyengine
+- Full T.I.R. game character wiring

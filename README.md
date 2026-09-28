@@ -2,13 +2,13 @@
 
 FBX asset loader for [Bevy](https://bevyengine.org) powered by [ufbx](https://github.com/ufbx/ufbx).
 
+Targets **Bevy glTF-class runtime parity** for FBX: scenes, skins, baked animation (TRS + morph weights), materials/textures, lights/cameras, NURBS tessellation — everything Bevy can consume. Not a 1:1 Autodesk FBX runtime.
+
 ## Bevy compatibility
 
 | bevy | bevy_ufbx |
 |------|-----------|
 | 0.19 | 0.19      |
-| 0.18 | 0.18      |
-| 0.17 | 0.17      |
 
 ## Installation
 
@@ -18,7 +18,7 @@ bevy     = "0.19"
 bevy_ufbx = "0.19"
 ```
 
-The default feature set includes `animation` (pulls in `bevy_animation`). Disable with `default-features = false` if you only need static meshes.
+Default features include `animation` (pulls `bevy_animation` + `morph_animation`).
 
 ## Quick start
 
@@ -26,14 +26,6 @@ The default feature set includes `animation` (pulls in `bevy_animation`). Disabl
 use bevy::prelude::*;
 use bevy::world_serialization::WorldAssetRoot;
 use bevy_ufbx::FbxPlugin;
-
-fn main() {
-    App::new()
-        .add_plugins(DefaultPlugins)
-        .add_plugins(FbxPlugin)
-        .add_systems(Startup, setup)
-        .run();
-}
 
 fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.spawn(Camera3d::default());
@@ -45,7 +37,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
 
 ## Animation
 
-Anim stacks are baked with `ufbx::bake_anim` into labeled [`AnimationClip`](https://docs.rs/bevy/latest/bevy/animation/struct.AnimationClip.html)s. The loader does **not** auto-play; build an `AnimationGraph` in your app (see `examples/animated_mesh_fbx.rs`).
+Stacks are baked with `ufbx::bake_anim` into labeled `AnimationClip`s (TRS + morph `WeightsCurve`). The loader does **not** auto-play — build an `AnimationGraph` in your app.
 
 ```rust
 use bevy_ufbx::FbxAssetLabel;
@@ -54,70 +46,49 @@ let clip = asset_server.load(FbxAssetLabel::Animation(0).from_asset("cube_anim.f
 let (graph, index) = AnimationGraph::from_clip(clip);
 ```
 
-Named takes are also on `Fbx.named_animations` when stacks have names.
+## Supported
 
-## Loading with custom settings
+- Triangle meshes: position, normal, UV0/UV1, vertex color, tangents
+- Morph / blend shapes → `MorphWeights` + `WeightsCurve`
+- Skinned meshes (LBS, top-4 weights, IBM `Skin{i}/InverseBindMatrices`, joint cap 256)
+- PBR materials, embedded textures, `.fbm` paths, wrap modes
+- Clearcoat / transmission / IOR factors when present
+- Hierarchy `WorldAsset`, lights, inactive cameras
+- NURBS surfaces tessellated to triangle meshes
+- Custom props as `FbxExtras`
+- Constraint / dual-quaternion: load with warning (bake in DCC)
 
-```rust
-use bevy_ufbx::{Fbx, FbxLoaderSettings};
+## Engine-impossible (documented, not implemented as live solvers)
 
-fn setup(asset_server: Res<AssetServer>) {
-    asset_server.load_with_settings::<Fbx, FbxLoaderSettings>(
-        "environment.fbx",
-        |s| {
-            s.load_cameras = false;
-            s.load_lights = false;
-            s.load_animations = false;
-        },
-    );
-}
-```
+- Live FBX constraints / IK
+- Dual-quaternion skinning (approximated as LBS)
+- Native NURBS renderer (tessellate only)
+- Stereo cameras, GPU mesh instancing
 
-### `FbxLoaderSettings` fields
-
-| Field                 | Type                | Default                       | Description                                              |
-|-----------------------|---------------------|-------------------------------|----------------------------------------------------------|
-| `load_meshes`         | `RenderAssetUsages` | `RenderAssetUsages::default()`| Which worlds the mesh is available in                    |
-| `load_materials`      | `RenderAssetUsages` | `RenderAssetUsages::default()`| Which worlds the material is available in                |
-| `load_cameras`        | `bool`              | `true`                        | Import cameras as inactive `Camera3d`                    |
-| `load_lights`         | `bool`              | `true`                        | Import lights onto nodes                                 |
-| `load_animations`     | `bool`              | `true`                        | Bake anim stacks into `AnimationClip`s                   |
-| `include_source`      | `bool`              | `false`                       | Keep raw bytes on the loaded `Fbx` asset                 |
-| `convert_coordinates` | `bool`              | `true`                        | Remap to Bevy RH Y-up metres via ufbx `LoadOpts`         |
+See [NOTES.md](NOTES.md).
 
 ## Asset labels
 
-| Label                        | Type                         | Description                          |
-|------------------------------|------------------------------|--------------------------------------|
-| `Scene{N}`                   | `WorldAsset`                 | Parent hierarchy                     |
-| `Mesh{N}`                    | `Mesh`                       | Triangulated mesh                    |
-| `Material{N}`                | `StandardMaterial`           | PBR material                         |
-| `Animation{N}`               | `AnimationClip`              | Baked take                           |
-| `Node{N}`                    | `FbxNode`                    | Transform node                       |
-| `Skin{N}`                    | `FbxSkin`                    | Skeletal skin                        |
-| `Skin{N}/InverseBindMatrices`| `SkinnedMeshInverseBindposes`| IBM buffer (cluster order)           |
-| `DefaultMaterial`            | `StandardMaterial`           | Fallback material                    |
-
-## Supported features
-
-- Triangle meshes (positions, normals, UVs) with multi-material face groups
-- PBR materials and textures (including `.fbm` folders)
-- Hierarchical `WorldAsset` scenes with `Name`d nodes
-- Skinned meshes: top-4 weights, IBM = `inverse(bind_to_world) * geometry_to_world`
-- Baked skeletal / transform animation (`AnimationPlayer` / `AnimationTarget` / `AnimatedBy`)
-- Directional, point, and spot lights; cameras as inactive `Camera3d`
-
-## Limitations (non-goals)
-
-See [NOTES.md](NOTES.md) for the explicit non-goal list (morph/blend shapes, NURBS, upstream Bevy PR, full game wiring).
+| Label | Type |
+|-------|------|
+| `Scene{N}` | `WorldAsset` |
+| `Mesh{N}` | `Mesh` |
+| `Material{N}` | `StandardMaterial` |
+| `Animation{N}` | `AnimationClip` |
+| `Node{N}` | `FbxNode` |
+| `Skin{N}` | `FbxSkin` |
+| `Skin{N}/InverseBindMatrices` | `SkinnedMeshInverseBindposes` |
+| `Texture{N}` | `Image` (embedded) |
+| `DefaultMaterial` | `StandardMaterial` |
 
 ## Examples
 
 ```sh
 cargo run --example load_fbx -- cube.fbx
 cargo run --example animated_mesh_fbx
+cargo run --example morph_fbx
 ```
 
 ## License
 
-Licensed under either of [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE) at your option.
+MIT OR Apache-2.0

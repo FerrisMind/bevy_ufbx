@@ -51,11 +51,34 @@ fn main() {
     println!("loaded '{path}'");
     println!("  scenes:    {}", fbx.scenes.len());
     println!("  meshes:    {}", fbx.meshes.len());
+    println!("  primitives:{}", fbx.primitive_meshes.len());
     println!("  materials: {}", fbx.materials.len());
     println!("  nodes:     {}", fbx.nodes.len());
     println!("  skins:     {}", fbx.skins.len());
     for name in fbx.named_skins.keys() {
         println!("  skin: {name}");
+    }
+
+    let fbx_meshes = world.resource::<Assets<bevy_ufbx::FbxMesh>>();
+    for (i, handle) in fbx.meshes.iter().enumerate() {
+        let Some(mesh) = fbx_meshes.get(handle) else {
+            continue;
+        };
+        println!(
+            "  FbxMesh{i} '{}': {} primitives",
+            mesh.name,
+            mesh.primitives.len()
+        );
+        for (p, prim) in mesh.primitives.iter().enumerate() {
+            println!(
+                "    Primitive{p}: material={}",
+                if prim.material.is_some() {
+                    "yes"
+                } else {
+                    "none"
+                }
+            );
+        }
     }
 
     for (i, (_, mesh)) in world.resource::<Assets<Mesh>>().iter().enumerate() {

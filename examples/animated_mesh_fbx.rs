@@ -16,6 +16,8 @@ use bevy::{
 use bevy_ufbx::{FbxAssetLabel, FbxPlugin};
 
 const FBX_PATH: &str = "cube_anim.fbx";
+/// Maya cm fixture → ~1 cm after ModifyGeometry; enlarge for demo framing only.
+const DEMO_VISUAL_SCALE: f32 = 100.0;
 
 fn main() {
     App::new()
@@ -54,7 +56,7 @@ fn setup_mesh_and_animation(
                 index,
             },
             WorldAssetRoot(asset_server.load(FbxAssetLabel::Scene(0).from_asset(FBX_PATH))),
-            Transform::from_scale(Vec3::splat(12.0)),
+            Transform::from_scale(Vec3::splat(DEMO_VISUAL_SCALE)),
         ))
         .observe(play_animation_when_ready);
 }
@@ -85,12 +87,13 @@ fn setup_camera_and_environment(
 ) {
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(1.0, 1.0, 1.6).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_xyz(2.5, 2.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
     commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(500.0, 500.0))),
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(8.0, 8.0))),
         MeshMaterial3d(materials.add(Color::srgb(0.3, 0.5, 0.3))),
+        Transform::from_xyz(0.0, -0.55, 0.0),
     ));
 
     commands.spawn((
@@ -100,8 +103,8 @@ fn setup_camera_and_environment(
             ..default()
         },
         CascadeShadowConfigBuilder {
-            first_cascade_far_bound: 200.0,
-            maximum_distance: 400.0,
+            first_cascade_far_bound: 15.0,
+            maximum_distance: 30.0,
             ..default()
         }
         .build(),

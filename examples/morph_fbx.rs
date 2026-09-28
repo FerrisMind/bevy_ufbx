@@ -4,13 +4,11 @@
 //! cargo run --example morph_fbx
 //! ```
 //!
-//! Asset: `assets/blend_shape_cube.fbx` (ufbx Maya fixture).
+//! Asset: `assets/blend_shape_cube.fbx` (Maya cm fixture from ufbx testdata).
 //!
-//! Measured facts (do not “guess” framing):
-//! - File `unit_meters = 0.01` (centimetres).
-//! - With `SpaceConversion::AdjustTransforms`, mesh verts stay ±0.5 and the
-//!   **node** local scale becomes `0.01` → world size ≈ **1 cm**.
-//! - Root scale `100` cancels that → ≈ 1 m cube on screen.
+//! With default [`bevy_ufbx::FbxSpaceConversion::ModifyGeometry`], the mesh is
+//! correctly ~**1 cm** in metres and node scale is identity. This example applies
+//! a visual root scale so the centimetre fixture is readable in a metre-ish scene.
 
 use std::f32::consts::PI;
 
@@ -20,8 +18,8 @@ use bevy::{
 use bevy_ufbx::{FbxAssetLabel, FbxPlugin};
 
 const FBX_PATH: &str = "blend_shape_cube.fbx";
-/// Inverse of the 0.01 node scale left by cm→m `AdjustTransforms`.
-const CM_TO_METRE_ROOT_SCALE: f32 = 100.0;
+/// Maya fixture is a 1 cm cube after metre conversion — enlarge for the demo only.
+const DEMO_VISUAL_SCALE: f32 = 100.0;
 
 fn main() {
     App::new()
@@ -60,7 +58,7 @@ fn setup_mesh_and_animation(
                 index,
             },
             WorldAssetRoot(asset_server.load(FbxAssetLabel::Scene(0).from_asset(FBX_PATH))),
-            Transform::from_scale(Vec3::splat(CM_TO_METRE_ROOT_SCALE)),
+            Transform::from_scale(Vec3::splat(DEMO_VISUAL_SCALE)),
         ))
         .observe(play_when_ready);
 }
@@ -90,7 +88,7 @@ fn setup_camera_and_environment(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // Framed for a ~1 m cube (after CM_TO_METRE_ROOT_SCALE).
+    // Framed for the demo-scaled (~1 m) cube.
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(2.5, 2.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),

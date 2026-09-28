@@ -67,7 +67,7 @@ fn try_process_fbx(path: &Path) -> Result<(), String> {
     )
     .map_err(|e| format!("ufbx: {e:?}"))?;
 
-    let scene: &ufbx::Scene = &*root;
+    let scene: &ufbx::Scene = &root;
 
     // --- Nodes / transforms ---
     for node in scene.nodes.as_ref().iter() {

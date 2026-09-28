@@ -8,8 +8,8 @@ fn test_plugin_builds() {
     app.add_plugins(AssetPlugin::default());
     app.add_plugins(FbxPlugin);
 
-    // If we get here without panic, the plugin is properly set up
-    assert!(true);
+    // Plugin registered without panic.
+    assert!(app.world().get_resource::<Assets<bevy_ufbx::Fbx>>().is_some());
 }
 
 #[test]
@@ -19,7 +19,7 @@ fn test_loader_registration() {
     app.add_plugins(AssetPlugin::default());
     app.add_plugins(FbxPlugin);
 
-    // Check that FBX extensions are registered
-    // This is a basic test that the loader is registered
-    assert!(true);
+    assert!(app.world().get_resource::<Assets<bevy_ufbx::Fbx>>().is_some());
+    assert!(app.world().get_resource::<Assets<bevy_ufbx::FbxNode>>().is_some());
+    assert!(app.world().get_resource::<Assets<bevy_ufbx::FbxSkin>>().is_some());
 }

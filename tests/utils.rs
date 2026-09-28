@@ -66,7 +66,7 @@ fn test_convert_transform() {
 #[test]
 fn test_convert_transform_with_rotation() {
     // Test with a 90-degree rotation around Y axis
-    let half_sqrt2 = 0.7071067811865476;
+    let half_sqrt2 = std::f64::consts::FRAC_1_SQRT_2;
     let ufbx_transform = ufbx::Transform {
         translation: ufbx::Vec3 {
             x: 0.0,

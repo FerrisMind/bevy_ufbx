@@ -11,8 +11,9 @@ fn test_loader_settings_default() {
     assert_eq!(settings.load_materials, RenderAssetUsages::default());
     assert!(settings.load_cameras);
     assert!(settings.load_lights);
+    assert!(settings.load_animations);
     assert!(!settings.include_source);
-    assert!(!settings.convert_coordinates);
+    assert!(settings.convert_coordinates);
 }
 
 #[test]
@@ -22,16 +23,18 @@ fn test_loader_settings_custom() {
         load_materials: RenderAssetUsages::MAIN_WORLD,
         load_cameras: false,
         load_lights: false,
+        load_animations: false,
         include_source: true,
-        convert_coordinates: true,
+        convert_coordinates: false,
     };
 
     assert_eq!(settings.load_meshes, RenderAssetUsages::RENDER_WORLD);
     assert_eq!(settings.load_materials, RenderAssetUsages::MAIN_WORLD);
     assert!(!settings.load_cameras);
     assert!(!settings.load_lights);
+    assert!(!settings.load_animations);
     assert!(settings.include_source);
-    assert!(settings.convert_coordinates);
+    assert!(!settings.convert_coordinates);
 }
 
 #[test]
@@ -41,6 +44,7 @@ fn test_loader_settings_serialization() {
         load_materials: RenderAssetUsages::MAIN_WORLD,
         load_cameras: false,
         load_lights: true,
+        load_animations: true,
         include_source: false,
         convert_coordinates: true,
     };
@@ -57,6 +61,7 @@ fn test_loader_settings_serialization() {
     assert_eq!(deserialized.load_materials, original.load_materials);
     assert_eq!(deserialized.load_cameras, original.load_cameras);
     assert_eq!(deserialized.load_lights, original.load_lights);
+    assert_eq!(deserialized.load_animations, original.load_animations);
     assert_eq!(deserialized.include_source, original.include_source);
     assert_eq!(
         deserialized.convert_coordinates,

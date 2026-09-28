@@ -16,8 +16,7 @@ fn test_plugin_initialization() {
     // Check that the plugin initialized correctly
     app.update();
 
-    // If we get here without panic, the plugin is working
-    assert!(true);
+    assert!(app.world().get_resource::<Assets<Fbx>>().is_some());
 }
 
 #[test]
@@ -70,8 +69,7 @@ fn test_fbx_loading_system() {
         app.update();
     }
 
-    // If we get here without panic, systems are working
-    assert!(true);
+    assert!(app.world().get_resource::<Assets<Fbx>>().is_some());
 }
 
 #[test]

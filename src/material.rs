@@ -10,18 +10,17 @@ use bevy::prelude::*;
 use bevy::material::AlphaMode;
 use std::collections::HashMap;
 
+type MaterialHandles = (
+    Vec<Handle<StandardMaterial>>,
+    HashMap<Box<str>, Handle<StandardMaterial>>,
+);
+
 /// Process all materials from the FBX scene.
 pub fn process_materials(
     scene: &ufbx::Scene,
     _settings: &FbxLoaderSettings,
     load_context: &mut LoadContext,
-) -> Result<
-    (
-        Vec<Handle<StandardMaterial>>,
-        HashMap<Box<str>, Handle<StandardMaterial>>,
-    ),
-    FbxError,
-> {
+) -> Result<MaterialHandles, FbxError> {
     let mut materials = Vec::new();
     let mut named_materials = HashMap::new();
     let texture_handles = process_textures(scene, load_context)?;

@@ -1,5 +1,6 @@
 //! Node and skin processing for FBX files.
 
+use crate::mesh::MAX_JOINTS;
 use crate::error::FbxError;
 use crate::label::FbxAssetLabel;
 use crate::names::node_display_name;
@@ -106,11 +107,36 @@ pub fn process_skins(
         }
 
         let skin_deformer = &mesh.skin_deformers[0];
+        if !matches!(
+            skin_deformer.skinning_method,
+            ufbx::SkinningMethod::Linear | ufbx::SkinningMethod::Rigid
+        ) {
+            warn!(
+                "FBX skin on '{}' uses {:?}; Bevy only supports linear blend skinning",
+                node.element.name, skin_deformer.skinning_method
+            );
+        }
+        if mesh.skin_deformers.len() > 1 {
+            warn!(
+                "FBX mesh on '{}' has {} skin deformers; only the first is imported",
+                node.element.name,
+                mesh.skin_deformers.len()
+            );
+        }
+
         let mut inverse_bind_matrices = Vec::new();
         let mut joint_handles = Vec::new();
         let mut joint_element_ids = Vec::new();
 
-        for cluster in &skin_deformer.clusters {
+        let cluster_count = skin_deformer.clusters.len();
+        if cluster_count > MAX_JOINTS {
+            warn!(
+                "FBX skin on '{}' has {cluster_count} joints (Bevy max {MAX_JOINTS}); truncating IBM and joints together",
+                node.element.name
+            );
+        }
+
+        for cluster in skin_deformer.clusters.iter().take(MAX_JOINTS) {
             let bone_inverse = convert_matrix(&cluster.bind_to_world).inverse();
             let geometry_to_world = convert_matrix(&cluster.geometry_to_world);
             let ibm = bone_inverse * geometry_to_world;

@@ -134,7 +134,35 @@ impl AssetLoader for FbxLoader {
         let metadata = FbxMeta {
             creator: Some(scene.metadata.creator.to_string()).filter(|s| !s.is_empty()),
             creation_time: None,
-            original_application: None,
+            original_application: {
+                let app = &scene.metadata.original_application;
+                let s = format!("{} {} {}", app.vendor, app.name, app.version)
+                    .trim()
+                    .to_string();
+                if s.is_empty() { None } else { Some(s) }
+            },
+        };
+
+        let (axis_system, unit_scale) = if settings.convert_coordinates {
+            (
+                FbxAxisSystem {
+                    up: Vec3::Y,
+                    front: Vec3::NEG_Z,
+                    handedness: Handedness::Right,
+                },
+                1.0,
+            )
+        } else {
+            let axes = scene.settings.axes;
+            (
+                FbxAxisSystem {
+                    up: axis_to_vec3(axes.up),
+                    front: axis_to_vec3(axes.front),
+                    // FBX axis triples are typically right-handed; unknown → Right.
+                    handedness: Handedness::Right,
+                },
+                scene.settings.unit_meters as f32,
+            )
         };
 
         let source = if settings.include_source {
@@ -159,12 +187,8 @@ impl AssetLoader for FbxLoader {
             #[cfg(feature = "animation")]
             named_animations: processed_anims.named_animations,
             default_scene: Some(scene_handle),
-            axis_system: FbxAxisSystem {
-                up: Vec3::Y,
-                front: Vec3::NEG_Z,
-                handedness: Handedness::Right,
-            },
-            unit_scale: 1.0,
+            axis_system,
+            unit_scale,
             metadata,
             source,
         })
@@ -172,5 +196,17 @@ impl AssetLoader for FbxLoader {
 
     fn extensions(&self) -> &[&str] {
         &["fbx"]
+    }
+}
+
+fn axis_to_vec3(axis: ufbx::CoordinateAxis) -> Vec3 {
+    match axis {
+        ufbx::CoordinateAxis::PositiveX => Vec3::X,
+        ufbx::CoordinateAxis::NegativeX => Vec3::NEG_X,
+        ufbx::CoordinateAxis::PositiveY => Vec3::Y,
+        ufbx::CoordinateAxis::NegativeY => Vec3::NEG_Y,
+        ufbx::CoordinateAxis::PositiveZ => Vec3::Z,
+        ufbx::CoordinateAxis::NegativeZ => Vec3::NEG_Z,
+        ufbx::CoordinateAxis::Unknown => Vec3::Y,
     }
 }

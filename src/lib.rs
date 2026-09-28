@@ -14,6 +14,8 @@
 use bevy::asset::AssetApp;
 use bevy::prelude::*;
 
+#[cfg(feature = "animation")]
+pub mod animation;
 pub mod error;
 pub mod label;
 pub mod loader;

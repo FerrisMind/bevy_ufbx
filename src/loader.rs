@@ -3,7 +3,7 @@
 use crate::error::FbxError;
 use crate::material::process_materials;
 use crate::mesh::process_meshes;
-use crate::node::{process_nodes, process_skins};
+use crate::node::process_nodes_and_skins;
 use crate::scene::build_scene;
 use crate::types::{Fbx, FbxAxisSystem, FbxMeta, Handedness};
 use bevy::asset::{io::Reader, AssetLoader, LoadContext, RenderAssetUsages};
@@ -11,23 +11,26 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+#[cfg(feature = "animation")]
+use crate::animation::process_animations;
+
 /// Settings for FBX file loading.
-///
-/// These settings allow customizing which parts of the FBX file are loaded
-/// and how they are processed.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct FbxLoaderSettings {
-    /// How meshes should be loaded and used
+    /// How meshes should be loaded and used.
     pub load_meshes: RenderAssetUsages,
-    /// How materials should be loaded and used
+    /// How materials should be loaded and used.
     pub load_materials: RenderAssetUsages,
-    /// Whether to load cameras from the FBX file
+    /// Whether to load cameras from the FBX file.
     pub load_cameras: bool,
-    /// Whether to load lights from the FBX file
+    /// Whether to load lights from the FBX file.
     pub load_lights: bool,
-    /// Whether to include raw source data in the loaded asset
+    /// Whether to bake and load animation stacks as [`AnimationClip`]s.
+    pub load_animations: bool,
+    /// Whether to keep raw FBX bytes on the [`Fbx`] asset.
     pub include_source: bool,
-    /// Whether to convert coordinate systems (e.g., Y-up to Z-up)
+    /// When true, force remapping into Bevy's right-handed Y-up metres space
+    /// (always applied via ufbx `LoadOpts` today; kept for API compatibility).
     pub convert_coordinates: bool,
 }
 
@@ -38,16 +41,14 @@ impl Default for FbxLoaderSettings {
             load_materials: RenderAssetUsages::default(),
             load_cameras: true,
             load_lights: true,
+            load_animations: true,
             include_source: false,
-            convert_coordinates: false,
+            convert_coordinates: true,
         }
     }
 }
 
 /// Loader implementation for FBX files.
-///
-/// This loader handles reading FBX files and converting them into Bevy assets,
-/// including meshes, materials, animations, and scene hierarchies.
 #[derive(Default, bevy::reflect::TypePath)]
 pub struct FbxLoader;
 
@@ -62,11 +63,9 @@ impl AssetLoader for FbxLoader {
         settings: &Self::Settings,
         load_context: &mut LoadContext<'_>,
     ) -> Result<Fbx, FbxError> {
-        // Read file
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;
 
-        // Basic validation
         if bytes.is_empty() {
             return Err(FbxError::InvalidData("Empty FBX file".to_string()));
         }
@@ -74,70 +73,100 @@ impl AssetLoader for FbxLoader {
             return Err(FbxError::InvalidData("FBX file too small".to_string()));
         }
 
-        // Parse with ufbx
-        let root = ufbx::load_memory(
-            &bytes,
+        let load_opts = if settings.convert_coordinates {
             ufbx::LoadOpts {
                 target_unit_meters: 1.0,
                 target_axes: ufbx::CoordinateAxes::right_handed_y_up(),
+                space_conversion: ufbx::SpaceConversion::AdjustTransforms,
+                geometry_transform_handling: ufbx::GeometryTransformHandling::HelperNodes,
+                inherit_mode_handling: ufbx::InheritModeHandling::Compensate,
+                generate_missing_normals: true,
                 ..Default::default()
-            },
-        )
-        .map_err(|e| FbxError::UfbxError(format!("{:?}", e)))?;
-        let scene: &ufbx::Scene = &*root;
+            }
+        } else {
+            ufbx::LoadOpts {
+                generate_missing_normals: true,
+                ..Default::default()
+            }
+        };
 
-        // Process meshes
-        let (meshes, named_meshes, mesh_transforms, mesh_material_info) =
-            process_meshes(scene, settings, load_context)?;
+        let root = ufbx::load_memory(&bytes, load_opts)
+            .map_err(|e| FbxError::UfbxError(format!("{e:?}")))?;
+        let scene: &ufbx::Scene = &root;
 
-        // Process materials and textures
+        let processed_meshes = process_meshes(scene, settings, load_context)?;
+
         let (materials, named_materials) = if !settings.load_materials.is_empty() {
             process_materials(scene, settings, load_context)?
         } else {
             (Vec::new(), HashMap::new())
         };
 
-        // Process nodes and hierarchy
-        let (nodes, named_nodes, node_map) = process_nodes(scene, &meshes, load_context)?;
+        let processed_nodes =
+            process_nodes_and_skins(scene, &processed_meshes.node_meshes, load_context)?;
 
-        // Process skins
-        let (skins, named_skins) = process_skins(scene, &node_map, load_context)?;
+        #[cfg(feature = "animation")]
+        let processed_anims = if settings.load_animations {
+            process_animations(scene, load_context)?
+        } else {
+            crate::animation::ProcessedAnimations {
+                animations: Vec::new(),
+                named_animations: HashMap::new(),
+            }
+        };
 
-        // Build scene
+        #[cfg(feature = "animation")]
+        let has_animations = settings.load_animations && !processed_anims.animations.is_empty();
+        #[cfg(not(feature = "animation"))]
+        let has_animations = false;
+
         let scene_handle = build_scene(
             scene,
-            &meshes,
+            &processed_meshes.node_meshes,
             &materials,
             &named_materials,
-            &mesh_transforms,
-            &mesh_material_info,
+            &processed_nodes.skin_data_by_mesh_element,
+            has_animations,
             settings,
             load_context,
         )?;
 
-        // Extract metadata
-        let metadata = FbxMeta::default();
+        let metadata = FbxMeta {
+            creator: Some(scene.metadata.creator.to_string()).filter(|s| !s.is_empty()),
+            creation_time: None,
+            original_application: None,
+        };
 
-        // Build final FBX asset
+        let source = if settings.include_source {
+            Some(bytes)
+        } else {
+            None
+        };
+
         Ok(Fbx {
             scenes: vec![scene_handle.clone()],
             named_scenes: HashMap::new(),
-            meshes,
-            named_meshes,
+            meshes: processed_meshes.meshes,
+            named_meshes: processed_meshes.named_meshes,
             materials,
             named_materials,
-            nodes,
-            named_nodes,
-            skins,
-            named_skins,
+            nodes: processed_nodes.nodes,
+            named_nodes: processed_nodes.named_nodes,
+            skins: processed_nodes.skins,
+            named_skins: processed_nodes.named_skins,
+            #[cfg(feature = "animation")]
+            animations: processed_anims.animations,
+            #[cfg(feature = "animation")]
+            named_animations: processed_anims.named_animations,
             default_scene: Some(scene_handle),
             axis_system: FbxAxisSystem {
                 up: Vec3::Y,
-                front: Vec3::Z,
+                front: Vec3::NEG_Z,
                 handedness: Handedness::Right,
             },
             unit_scale: 1.0,
             metadata,
+            source,
         })
     }
 

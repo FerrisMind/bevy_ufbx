@@ -3,10 +3,10 @@
 use crate::error::FbxError;
 use crate::label::FbxAssetLabel;
 use crate::names::{animation_name_path, node_typed_id};
+use bevy::animation::animation_curves::WeightsCurve;
 use bevy::animation::gltf_curves::WideLinearKeyframeCurve;
 use bevy::animation::prelude::AnimatableCurve;
-use bevy::animation::{animated_field, AnimationClip, AnimationTargetId};
-use bevy::animation::animation_curves::WeightsCurve;
+use bevy::animation::{AnimationClip, AnimationTargetId, animated_field};
 use bevy::asset::{Handle, LoadContext};
 use bevy::math::curve::{ConstantCurve, Interval, UnevenSampleAutoCurve};
 use bevy::mesh::morph::MAX_MORPH_WEIGHTS;
@@ -20,6 +20,11 @@ pub struct ProcessedAnimations {
 }
 
 /// Bake each FBX anim stack into a labeled [`AnimationClip`].
+///
+/// Clips are labeled `Animation{N}` only. Bevy's [`LoadContext`] does not support
+/// registering a second label for the same asset, so stack names are exposed via
+/// [`ProcessedAnimations::named_animations`] (and [`crate::Fbx::named_animations`])
+/// rather than as `AssetPath` labels.
 pub fn process_animations(
     scene: &ufbx::Scene,
     load_context: &mut LoadContext,
@@ -28,10 +33,14 @@ pub fn process_animations(
     let mut named_animations = HashMap::new();
 
     for (stack_index, stack) in scene.anim_stacks.as_ref().iter().enumerate() {
-        let take_name = if stack.element.name.is_empty() {
-            format!("take{stack_index}")
-        } else {
-            stack.element.name.to_string()
+        // Trim so keys match DCC take names like "Take 001" without stray whitespace.
+        let take_name = {
+            let raw = stack.element.name.trim();
+            if raw.is_empty() {
+                format!("take{stack_index}")
+            } else {
+                raw.to_string()
+            }
         };
 
         let baked = ufbx::bake_anim(

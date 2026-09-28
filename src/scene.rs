@@ -2,14 +2,18 @@
 
 use crate::error::FbxError;
 use crate::label::FbxAssetLabel;
-use crate::loader::FbxLoaderSettings;
+use crate::loader::{FbxLoaderSettings, FbxSkinnedMeshBoundsPolicy};
 use crate::names::{
     animation_name_path, animation_root_typed_ids, is_ancestor_of, node_name_component,
     node_typed_id,
 };
-use crate::types::{FbxExtras, FbxMeshName, FbxSkin, NodeMeshPrimitive};
-use crate::utils::convert_transform;
+use crate::types::{
+    FbxExtras, FbxMaterialExtras, FbxMaterialName, FbxMeshExtras, FbxMeshName, FbxSceneExtras,
+    FbxSceneName, FbxSkin, NodeMeshPrimitive,
+};
+use crate::utils::{convert_matrix, convert_transform, props_to_extras};
 use bevy::asset::{Handle, LoadContext};
+use bevy::camera::visibility::{DynamicSkinnedMeshBounds, NoFrustumCulling};
 use bevy::mesh::morph::{MeshMorphWeights, MorphWeights};
 use bevy::mesh::skinning::SkinnedMesh;
 use bevy::pbr::StandardMaterial;
@@ -27,6 +31,7 @@ pub fn build_scene(
     node_meshes: &HashMap<u32, Vec<NodeMeshPrimitive>>,
     materials: &[Handle<StandardMaterial>],
     named_materials: &HashMap<Box<str>, Handle<StandardMaterial>>,
+    inverted_materials: &[Handle<StandardMaterial>],
     skin_data_by_mesh_element: &HashMap<u32, FbxSkin>,
     has_animations: bool,
     settings: &FbxLoaderSettings,
@@ -36,10 +41,42 @@ pub fn build_scene(
 
     let mut world = World::new();
 
+    let scene_label = scene.root_node.element.name.to_string();
+    let scene_name = if scene_label.is_empty() {
+        "Scene0".to_string()
+    } else {
+        scene_label
+    };
+    let scene_extras = props_to_extras(&scene.metadata.scene_props)
+        .or_else(|| props_to_extras(&scene.root_node.element.props));
+    // Marker entity carrying scene identity (mirrors glTF scene name/extras).
+    {
+        let mut scene_marker = world.spawn((
+            Transform::default(),
+            GlobalTransform::default(),
+            Visibility::Hidden,
+            FbxSceneName(scene_name),
+        ));
+        if let Some(extras) = scene_extras {
+            scene_marker.insert(FbxSceneExtras {
+                value: extras.value,
+            });
+        }
+    }
+
     let default_material = materials.first().cloned().unwrap_or_else(|| {
         load_context.add_labeled_asset(
             FbxAssetLabel::DefaultMaterial.to_string(),
             StandardMaterial::default(),
+        )
+    });
+    let default_inverted = inverted_materials.first().cloned().unwrap_or_else(|| {
+        load_context.add_labeled_asset(
+            FbxAssetLabel::MaterialInverted(0).to_string(),
+            StandardMaterial {
+                cull_mode: Some(bevy::render::render_resource::Face::Front),
+                ..Default::default()
+            },
         )
     });
 
@@ -59,12 +96,8 @@ pub fn build_scene(
             Visibility::Hidden
         };
 
-        let mut entity_cmds = world.spawn((
-            transform,
-            GlobalTransform::default(),
-            visibility,
-            name,
-        ));
+        let mut entity_cmds =
+            world.spawn((transform, GlobalTransform::default(), visibility, name));
 
         if let Some(extras) = props_to_extras(&u_node.element.props) {
             entity_cmds.insert(extras);
@@ -146,16 +179,12 @@ pub fn build_scene(
         };
 
         let skin = skin_data_by_mesh_element.get(&u_node.element.element_id);
+        // Match bevy_gltf: odd number of negative axes on **world** scale
+        // (not local sx*sy*sz), so parent mirrors flip child winding too.
         let neg_scale = {
-            let s = u_node.local_transform.scale;
-            (s.x * s.y * s.z) < 0.0
+            let world = Transform::from_matrix(convert_matrix(&u_node.node_to_world));
+            world.scale.is_negative_bitmask().count_ones() & 1 == 1
         };
-        if neg_scale {
-            warn!(
-                "FBX node '{}' has negative scale; cull inversion for mirrored materials is approximate",
-                u_node.element.name
-            );
-        }
 
         let mut max_morph = 0usize;
         let mut morph_weights: Vec<f32> = Vec::new();
@@ -166,13 +195,50 @@ pub fn build_scene(
                 .entity_mut(node_entity)
                 .insert(FbxMeshName(u_node.element.name.to_string()));
         }
+        // Mesh extras: prefer ufbx Mesh element props, fall back to node props.
+        let mesh_extras = u_node
+            .mesh
+            .as_ref()
+            .and_then(|m| props_to_extras(&m.element.props))
+            .or_else(|| props_to_extras(&u_node.element.props));
+        if let Some(extras) = mesh_extras {
+            world.entity_mut(node_entity).insert(FbxMeshExtras {
+                value: extras.value,
+            });
+        }
 
-        for primitive in primitives {
-            let material = named_materials
-                .get(primitive.material_name.as_str())
-                .cloned()
+        for primitive in primitives.iter() {
+            let base_material = primitive
+                .material_index
+                .and_then(|scene_idx| {
+                    compact_material_index(scene, scene_idx).and_then(|i| materials.get(i).cloned())
+                })
+                .or_else(|| {
+                    named_materials
+                        .get(primitive.material_name.as_str())
+                        .cloned()
+                })
                 .or_else(|| materials.first().cloned())
                 .unwrap_or_else(|| default_material.clone());
+            // Double-sided materials already have `cull_mode: None`; skip the
+            // cull-inverted twin (same visual, keeps the base asset identity).
+            let material = if neg_scale && !material_is_double_sided(scene, primitive) {
+                primitive
+                    .material_index
+                    .and_then(|scene_idx| {
+                        compact_material_index(scene, scene_idx)
+                            .and_then(|i| inverted_materials.get(i).cloned())
+                    })
+                    .or_else(|| {
+                        materials
+                            .iter()
+                            .position(|h| h == &base_material)
+                            .and_then(|i| inverted_materials.get(i).cloned())
+                    })
+                    .unwrap_or_else(|| default_inverted.clone())
+            } else {
+                base_material
+            };
 
             let local = Transform::from_matrix(primitive.geometry_to_node);
             let mut mesh_entity = world.spawn((
@@ -182,6 +248,15 @@ pub fn build_scene(
                 GlobalTransform::default(),
                 Visibility::Inherited,
             ));
+            if !primitive.material_name.is_empty() {
+                mesh_entity.insert(FbxMaterialName(primitive.material_name.clone()));
+            }
+            // Material extras from the matching material element, not the node.
+            if let Some(extras) = material_extras_for_primitive(scene, primitive) {
+                mesh_entity.insert(FbxMaterialExtras {
+                    value: extras.value,
+                });
+            }
 
             if primitive.morph_target_count > 0 {
                 max_morph = max_morph.max(primitive.morph_target_count);
@@ -210,6 +285,15 @@ pub fn build_scene(
                         inverse_bindposes: skin.inverse_bind_matrices.clone(),
                         joints,
                     });
+                    match settings.skinned_mesh_bounds_policy {
+                        FbxSkinnedMeshBoundsPolicy::Dynamic => {
+                            mesh_entity.insert(DynamicSkinnedMeshBounds);
+                        }
+                        FbxSkinnedMeshBoundsPolicy::NoFrustumCulling => {
+                            mesh_entity.insert(NoFrustumCulling);
+                        }
+                        FbxSkinnedMeshBoundsPolicy::BindPose => {}
+                    }
                 }
             }
 
@@ -226,7 +310,10 @@ pub fn build_scene(
                     world.entity_mut(node_entity).insert(mw);
                 }
                 Err(e) => {
-                    warn!("Failed to create MorphWeights on '{}': {e}", u_node.element.name);
+                    warn!(
+                        "Failed to create MorphWeights on '{}': {e}",
+                        u_node.element.name
+                    );
                 }
             }
         }
@@ -266,34 +353,80 @@ fn warn_unsupported_features(scene: &ufbx::Scene) {
             scene.constraints.len()
         );
     }
+    if !scene.cache_files.is_empty() || !scene.cache_deformers.is_empty() {
+        warn!(
+            "FBX contains geometry cache data ({} cache file(s), {} cache deformer(s)); not imported",
+            scene.cache_files.len(),
+            scene.cache_deformers.len()
+        );
+    }
+    if !scene.lod_groups.is_empty() {
+        warn!(
+            "FBX contains {} LOD group(s); LOD switching is not imported",
+            scene.lod_groups.len()
+        );
+    }
+    if !scene.display_layers.is_empty() {
+        warn!(
+            "FBX contains {} display layer(s); display layers are not imported",
+            scene.display_layers.len()
+        );
+    }
 }
 
-fn props_to_extras(props: &ufbx::Props) -> Option<FbxExtras> {
-    if props.props.is_empty() {
-        return None;
-    }
-    let mut parts = Vec::new();
-    for prop in props.props.as_ref().iter() {
-        if prop.name.is_empty() {
+/// Map `scene.materials` index → compact index in loader `materials` /
+/// `inverted_materials` vecs (which skip `element_id == 0` placeholders).
+fn compact_material_index(scene: &ufbx::Scene, scene_index: usize) -> Option<usize> {
+    let mut compact = 0usize;
+    for (i, material) in scene.materials.as_ref().iter().enumerate() {
+        if material.element.element_id == 0 {
             continue;
         }
-        let value = if !prop.value_str.is_empty() {
-            prop.value_str.to_string()
-        } else {
-            format!(
-                "({},{},{},{})",
-                prop.value_vec4.x, prop.value_vec4.y, prop.value_vec4.z, prop.value_vec4.w
-            )
-        };
-        parts.push(format!("{}={}", prop.name, value));
+        if i == scene_index {
+            return Some(compact);
+        }
+        compact += 1;
     }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(FbxExtras {
-            value: parts.join(";"),
-        })
+    None
+}
+
+/// True when the primitive's base material is double-sided (`cull_mode: None`).
+fn material_is_double_sided(scene: &ufbx::Scene, primitive: &NodeMeshPrimitive) -> bool {
+    if let Some(scene_idx) = primitive.material_index
+        && let Some(material) = scene.materials.as_ref().get(scene_idx)
+    {
+        return material.features.double_sided.enabled;
     }
+    if !primitive.material_name.is_empty() {
+        for material in scene.materials.as_ref().iter() {
+            if material.element.name.as_ref() == primitive.material_name.as_str() {
+                return material.features.double_sided.enabled;
+            }
+        }
+    }
+    false
+}
+
+fn material_extras_for_primitive(
+    scene: &ufbx::Scene,
+    primitive: &NodeMeshPrimitive,
+) -> Option<FbxExtras> {
+    if let Some(scene_idx) = primitive.material_index
+        && let Some(material) = scene.materials.as_ref().get(scene_idx)
+        && let Some(extras) = props_to_extras(&material.element.props)
+    {
+        return Some(extras);
+    }
+    if !primitive.material_name.is_empty() {
+        for material in scene.materials.as_ref().iter() {
+            if material.element.name.as_ref() == primitive.material_name.as_str()
+                && let Some(extras) = props_to_extras(&material.element.props)
+            {
+                return Some(extras);
+            }
+        }
+    }
+    None
 }
 
 fn insert_light(mut entity: EntityWorldMut, light: &ufbx::Light) {

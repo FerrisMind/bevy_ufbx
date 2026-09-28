@@ -9,6 +9,10 @@ description = "FBX asset loader for Bevy using the ufbx library"
 keywords = ["bevy", "fbx", "asset", "loader"]
 categories = ["game-development", "graphics"]
 
+[features]
+default = ["animation"]
+animation = ["bevy/bevy_animation"]
+
 [dependencies]
 bevy = { version = "0.19", default-features = false, features = [
     "bevy_asset",

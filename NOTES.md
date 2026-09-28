@@ -10,12 +10,22 @@ Match what `bevy_gltf` exposes at runtime, fed by ufbx — not 1:1 Autodesk FBX 
 
 - Hierarchy `WorldAsset`, skins + IBM, bake_anim TRS + morph `WeightsCurve`
 - Mesh attrs: color, tangent (or generated), UV0/UV1
+- Shared mesh instances: same ufbx mesh `element_id` on multiple nodes reuses one `FbxMesh` / primitives
 - Blend shapes → morph targets + `MorphWeights` / `MeshMorphWeights`
 - Embedded textures + wrap modes; richer PBR factors (coat/transmission/IOR)
 - NURBS → tessellate to `Mesh`
 - Constraint / non-linear skinning: warn and continue
 - Honest `axis_system` / `unit_scale` when `convert_coordinates: false`
-- `FbxExtras`, `FbxMeshName` components
+- `FbxExtras` from **USER_DEFINED** custom props only (built-in / synthetic props skipped)
+- `FbxMeshName` components
+- `FbxMesh` container asset (glTF-style): `Mesh{N}` labels `FbxMesh`; Bevy meshes are `Mesh{N}/Primitive{P}`
+- `FbxPrimitive` on `FbxMesh.primitives` (mesh + optional `StandardMaterial` + extras); `Fbx.primitive_meshes` flat Bevy [`Mesh`] list; `FbxNode.mesh` is `Option<Handle<FbxMesh>>`
+- `FbxNode`: `children` + `skin` handles filled (two-pass label reservation, glTF-style)
+- `FbxMaterial` container asset (glTF-style): `Material{N}` → `FbxMaterial` (`.material` is `StandardMaterial`); inverted twins stay `Material{N} (inverted)` as bare `StandardMaterial`
+- World **neg-scale**: odd count of negative axes on **world** scale (not local `sx*sy*sz`) selects `Material{N} (inverted)` cull twin (skips double-sided)
+- Texture samplers: FBX `wrap_u` / `wrap_v` → address modes; mag/min/mip from `FbxLoaderSettings::default_sampler` (or full replace via `override_sampler`) — ufbx 0.9 has no filter fields
+- Blender PBR: `use_blender_pbr_material` when probe exporter is Blender binary/ascii
+- Anim takes: `Animation{N}` labels + `Fbx.named_animations["Take 001"]` map (no second name label)
 
 ## Engine-impossible / bake-only
 
@@ -29,9 +39,11 @@ Match what `bevy_gltf` exposes at runtime, fed by ufbx — not 1:1 Autodesk FBX 
 
 ## LoadOpts (when `convert_coordinates`)
 
-RH Y-up, metres, `AdjustTransforms`, `HelperNodes`, `InheritModeHandling::Compensate`.
+RH Y-up, metres. Default [`FbxSpaceConversion::Auto`]: probe exporter with `ignore_all_content`, then
+- Blender binary/ascii → `AdjustTransforms` (undo export root ×100)
+- otherwise (Maya/cm, Mixamo, unknown) → `ModifyGeometry` (bake units into verts; clean node scales)
 
-**Units caveat:** Maya/ufbx fixtures often have `unit_meters = 0.01` (cm). With `AdjustTransforms`, mesh vertex AABB stays in file units (e.g. ±0.5) while the **node local scale** becomes `0.01`, so the world-space cube is **~1 cm**. Examples that need a metre-sized subject must root-scale by `~100` (see `examples/morph_fbx.rs`).
+Maya centimetre fixtures correctly become ~1 cm in world metres — examples may apply a **demo** root scale for readability.
 
 ## Fixtures
 

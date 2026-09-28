@@ -39,23 +39,36 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
 
 Stacks are baked with `ufbx::bake_anim` into labeled `AnimationClip`s (TRS + morph `WeightsCurve`). The loader does **not** auto-play — build an `AnimationGraph` in your app.
 
-```rust
-use bevy_ufbx::FbxAssetLabel;
+Clips are labeled `Animation{N}` only (Bevy cannot attach two labels to one asset). Look up takes by name on the loaded `Fbx`:
 
+```rust
+use bevy_ufbx::{Fbx, FbxAssetLabel};
+
+// By index label:
 let clip = asset_server.load(FbxAssetLabel::Animation(0).from_asset("cube_anim.fbx"));
+
+// By take name (after the Fbx asset is loaded):
+// let clip = fbx.named_animations["Take 001"].clone();
+
 let (graph, index) = AnimationGraph::from_clip(clip);
 ```
 
+## Units / coordinate conversion
+
+Default `convert_coordinates: true` loads into Bevy RH Y-up **metres**.
+`FbxSpaceConversion::Auto` (default) picks `ModifyGeometry` for Maya/cm-style files and
+`AdjustTransforms` for Blender exports, per [ufbx coordinate-space guidance](https://ufbx.github.io/docs/nodes/#coordinate-spaces).
+
 ## Supported
 
-- Triangle meshes: position, normal, UV0/UV1, vertex color, tangents
+- Triangle meshes: position, normal, UV0/UV1, vertex color, tangents (shared mesh `element_id`s reused)
 - Morph / blend shapes → `MorphWeights` + `WeightsCurve`
 - Skinned meshes (LBS, top-4 weights, IBM `Skin{i}/InverseBindMatrices`, joint cap 256)
-- PBR materials, embedded textures, `.fbm` paths, wrap modes
-- Clearcoat / transmission / IOR factors when present
-- Hierarchy `WorldAsset`, lights, inactive cameras
+- PBR materials, embedded textures, `.fbm` paths, wrap modes (+ `default_sampler` / `override_sampler`)
+- Clearcoat / transmission / IOR factors when present; Blender PBR flag when exporter is Blender
+- Hierarchy `WorldAsset`, lights, inactive cameras; `FbxNode` children + skin
 - NURBS surfaces tessellated to triangle meshes
-- Custom props as `FbxExtras`
+- USER_DEFINED custom props as `FbxExtras`
 - Constraint / dual-quaternion: load with warning (bake in DCC)
 
 ## Engine-impossible (documented, not implemented as live solvers)
@@ -72,8 +85,11 @@ See [NOTES.md](NOTES.md).
 | Label | Type |
 |-------|------|
 | `Scene{N}` | `WorldAsset` |
-| `Mesh{N}` | `Mesh` |
-| `Material{N}` | `StandardMaterial` |
+| `Mesh{N}` | `FbxMesh` (container) |
+| `Mesh{N}/Primitive{P}` | Bevy `Mesh` |
+| `Material{N}` | `FbxMaterial` (`.material` → `StandardMaterial`) |
+| `Material{N}/Standard` | `StandardMaterial` (non-inverted) |
+| `Material{N} (inverted)` | `StandardMaterial` (cull-flipped) |
 | `Animation{N}` | `AnimationClip` |
 | `Node{N}` | `FbxNode` |
 | `Skin{N}` | `FbxSkin` |

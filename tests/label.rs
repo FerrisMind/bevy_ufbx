@@ -45,9 +45,9 @@ fn test_animation_label() {
 }
 
 #[test]
-fn test_skin_label() {
-    let label = FbxAssetLabel::Skin(4);
-    assert_eq!(label.to_string(), "Skin4");
+fn test_inverse_bind_matrices_label() {
+    let label = FbxAssetLabel::InverseBindMatrices(3);
+    assert_eq!(label.to_string(), "Skin3/InverseBindMatrices");
 }
 
 #[test]

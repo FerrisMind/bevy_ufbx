@@ -2,11 +2,14 @@
 
 use bevy::asset::{Asset, Handle};
 use bevy::math::Affine2;
+use bevy::mesh::skinning::SkinnedMeshInverseBindposes;
 use bevy::pbr::StandardMaterial;
 use bevy::prelude::*;
-use bevy::mesh::skinning::SkinnedMeshInverseBindposes;
 use bevy::world_serialization::WorldAsset;
 use std::collections::HashMap;
+
+#[cfg(feature = "animation")]
+use bevy::animation::AnimationClip;
 
 // ============================================================================
 // Coordinate System
@@ -155,7 +158,12 @@ pub struct FbxNode {
 pub struct FbxSkin {
     pub index: usize,
     pub name: String,
+    /// Joint node asset handles in cluster order.
     pub joints: Vec<Handle<FbxNode>>,
+    /// Joint ufbx element IDs in cluster order (for scene entity resolution).
+    pub joint_element_ids: Vec<u32>,
+    /// Element id of the mesh node this skin belongs to.
+    pub mesh_element_id: u32,
     pub inverse_bind_matrices: Handle<SkinnedMeshInverseBindposes>,
 }
 
@@ -169,6 +177,14 @@ pub enum FbxInterpolation {
     Constant,
     Linear,
     Cubic,
+}
+
+/// One mesh primitive attached to an FBX node (after material splitting).
+#[derive(Debug, Clone)]
+pub struct NodeMeshPrimitive {
+    pub mesh: Handle<Mesh>,
+    pub material_name: String,
+    pub geometry_to_node: Mat4,
 }
 
 // ============================================================================
@@ -188,8 +204,14 @@ pub struct Fbx {
     pub named_nodes: HashMap<Box<str>, Handle<FbxNode>>,
     pub skins: Vec<Handle<FbxSkin>>,
     pub named_skins: HashMap<Box<str>, Handle<FbxSkin>>,
+    #[cfg(feature = "animation")]
+    pub animations: Vec<Handle<AnimationClip>>,
+    #[cfg(feature = "animation")]
+    pub named_animations: HashMap<Box<str>, Handle<AnimationClip>>,
     pub default_scene: Option<Handle<WorldAsset>>,
     pub axis_system: FbxAxisSystem,
     pub unit_scale: f32,
     pub metadata: FbxMeta,
+    /// Raw FBX bytes when [`crate::FbxLoaderSettings::include_source`] is set.
+    pub source: Option<Vec<u8>>,
 }

@@ -12,14 +12,14 @@ pub enum FbxAssetLabel {
     Material(usize),
     /// `Animation{}`: FBX animation as a Bevy [`AnimationClip`](bevy::animation::AnimationClip)
     Animation(usize),
-    /// `AnimationStack{}`: FBX animation stack with multiple layers
-    AnimationStack(usize),
     /// `Skeleton{}`: FBX skeleton for skeletal animation
     Skeleton(usize),
     /// `Node{}`: Individual FBX node in the scene hierarchy
     Node(usize),
     /// `Skin{}`: FBX skin for skeletal animation
     Skin(usize),
+    /// `Skin{}/InverseBindMatrices`: inverse bind pose matrices for a skin
+    InverseBindMatrices(usize),
     /// `Light{}`: FBX light definition
     Light(usize),
     /// `Camera{}`: FBX camera definition
@@ -37,17 +37,19 @@ pub enum FbxAssetLabel {
 impl core::fmt::Display for FbxAssetLabel {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            FbxAssetLabel::Scene(index) => f.write_str(&format!("Scene{index}")),
-            FbxAssetLabel::Mesh(index) => f.write_str(&format!("Mesh{index}")),
-            FbxAssetLabel::Material(index) => f.write_str(&format!("Material{index}")),
-            FbxAssetLabel::Animation(index) => f.write_str(&format!("Animation{index}")),
-            FbxAssetLabel::AnimationStack(index) => f.write_str(&format!("AnimationStack{index}")),
-            FbxAssetLabel::Skeleton(index) => f.write_str(&format!("Skeleton{index}")),
-            FbxAssetLabel::Node(index) => f.write_str(&format!("Node{index}")),
-            FbxAssetLabel::Skin(index) => f.write_str(&format!("Skin{index}")),
-            FbxAssetLabel::Light(index) => f.write_str(&format!("Light{index}")),
-            FbxAssetLabel::Camera(index) => f.write_str(&format!("Camera{index}")),
-            FbxAssetLabel::Texture(index) => f.write_str(&format!("Texture{index}")),
+            FbxAssetLabel::Scene(index) => write!(f, "Scene{index}"),
+            FbxAssetLabel::Mesh(index) => write!(f, "Mesh{index}"),
+            FbxAssetLabel::Material(index) => write!(f, "Material{index}"),
+            FbxAssetLabel::Animation(index) => write!(f, "Animation{index}"),
+            FbxAssetLabel::Skeleton(index) => write!(f, "Skeleton{index}"),
+            FbxAssetLabel::Node(index) => write!(f, "Node{index}"),
+            FbxAssetLabel::Skin(index) => write!(f, "Skin{index}"),
+            FbxAssetLabel::InverseBindMatrices(index) => {
+                write!(f, "Skin{index}/InverseBindMatrices")
+            }
+            FbxAssetLabel::Light(index) => write!(f, "Light{index}"),
+            FbxAssetLabel::Camera(index) => write!(f, "Camera{index}"),
+            FbxAssetLabel::Texture(index) => write!(f, "Texture{index}"),
             FbxAssetLabel::DefaultScene => f.write_str("DefaultScene"),
             FbxAssetLabel::DefaultMaterial => f.write_str("DefaultMaterial"),
             FbxAssetLabel::RootNode => f.write_str("RootNode"),

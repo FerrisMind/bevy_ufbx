@@ -47,6 +47,9 @@ impl Plugin for FbxPlugin {
             .init_asset::<FbxNode>()
             .init_asset::<FbxSkin>()
             .init_asset::<Skeleton>()
+            .register_type::<FbxExtras>()
+            .register_type::<FbxMeshName>()
+            .register_type::<FbxMaterialName>()
             .register_asset_loader(FbxLoader);
     }
 }

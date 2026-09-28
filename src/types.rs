@@ -5,6 +5,7 @@ use bevy::math::Affine2;
 use bevy::mesh::skinning::SkinnedMeshInverseBindposes;
 use bevy::pbr::StandardMaterial;
 use bevy::prelude::*;
+use bevy::reflect::Reflect;
 use bevy::world_serialization::WorldAsset;
 use std::collections::HashMap;
 
@@ -185,7 +186,28 @@ pub struct NodeMeshPrimitive {
     pub mesh: Handle<Mesh>,
     pub material_name: String,
     pub geometry_to_node: Mat4,
+    /// Number of morph targets on this mesh (0 if none).
+    pub morph_target_count: usize,
+    /// Default blend channel weights (length == morph_target_count).
+    pub morph_weights: Vec<f32>,
 }
+
+/// Optional FBX custom-property extras (glTF-style string blob).
+#[derive(Component, Reflect, Debug, Clone, Default)]
+#[reflect(Component, Default)]
+pub struct FbxExtras {
+    pub value: String,
+}
+
+/// Display name of an FBX mesh node (for tooling / queries).
+#[derive(Component, Reflect, Debug, Clone)]
+#[reflect(Component)]
+pub struct FbxMeshName(pub String);
+
+/// Display name of an FBX material.
+#[derive(Component, Reflect, Debug, Clone)]
+#[reflect(Component)]
+pub struct FbxMaterialName(pub String);
 
 // ============================================================================
 // Main FBX Asset

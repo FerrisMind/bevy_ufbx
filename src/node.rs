@@ -1,11 +1,11 @@
 //! Node and skin processing for FBX files.
 
-use crate::mesh::MAX_JOINTS;
 use crate::error::FbxError;
 use crate::label::FbxAssetLabel;
-use crate::names::node_display_name;
-use crate::types::{FbxNode, FbxSkin, NodeMeshPrimitive};
-use crate::utils::{convert_matrix, convert_transform};
+use crate::mesh::MAX_JOINTS;
+use crate::names::{animation_root_typed_ids, node_display_name, node_typed_id};
+use crate::types::{FbxMesh, FbxNode, FbxSkin};
+use crate::utils::{convert_matrix, convert_transform, props_to_extras};
 use bevy::asset::{Handle, LoadContext};
 use bevy::mesh::skinning::SkinnedMeshInverseBindposes;
 use bevy::prelude::*;
@@ -25,49 +25,70 @@ pub struct ProcessedNodes {
 /// Process nodes and skins.
 pub fn process_nodes_and_skins(
     scene: &ufbx::Scene,
-    node_meshes: &HashMap<u32, Vec<NodeMeshPrimitive>>,
+    node_fbx_meshes: &HashMap<u32, Handle<FbxMesh>>,
     load_context: &mut LoadContext,
 ) -> Result<ProcessedNodes, FbxError> {
     let mut nodes = Vec::new();
     let mut named_nodes = HashMap::new();
-    let mut node_map = HashMap::new();
-    let mut handles_by_index: Vec<Handle<FbxNode>> = Vec::with_capacity(scene.nodes.len());
+    let mut node_map: HashMap<u32, Handle<FbxNode>> = HashMap::new();
 
+    let anim_roots: std::collections::HashSet<u32> = {
+        #[cfg(feature = "animation")]
+        {
+            animation_root_typed_ids(scene).into_iter().collect()
+        }
+        #[cfg(not(feature = "animation"))]
+        {
+            std::collections::HashSet::new()
+        }
+    };
+
+    // First pass: reserve labeled handles so children/joints can reference them
+    // before the [`FbxNode`] assets are materialized (bevy_gltf pattern).
+    for (index, ufbx_node) in scene.nodes.as_ref().iter().enumerate() {
+        let handle: Handle<FbxNode> =
+            load_context.get_label_handle(FbxAssetLabel::Node(index).to_string());
+        node_map.insert(ufbx_node.element.element_id, handle);
+    }
+
+    let (skins, named_skins, skin_data_by_mesh_element, skin_handles_by_mesh_element) =
+        process_skins(scene, &node_map, load_context)?;
+
+    // Second pass: materialize nodes with children + skin filled.
     for (index, ufbx_node) in scene.nodes.as_ref().iter().enumerate() {
         let name = node_display_name(ufbx_node);
-        let mesh_handle = node_meshes
+        let mesh_handle = node_fbx_meshes.get(&ufbx_node.element.element_id).cloned();
+        let skin = skin_handles_by_mesh_element
             .get(&ufbx_node.element.element_id)
-            .and_then(|prims| prims.first())
-            .map(|p| p.mesh.clone());
+            .cloned();
+
+        let children: Vec<Handle<FbxNode>> = ufbx_node
+            .children
+            .as_ref()
+            .iter()
+            .filter_map(|child| node_map.get(&child.element.element_id).cloned())
+            .collect();
 
         let fbx_node = FbxNode {
             index,
             name: name.clone(),
-            children: Vec::new(),
+            children,
             mesh: mesh_handle,
-            skin: None,
+            skin,
             transform: convert_transform(&ufbx_node.local_transform),
             visible: ufbx_node.visible,
+            #[cfg(feature = "animation")]
+            is_animation_root: anim_roots.contains(&node_typed_id(ufbx_node)),
         };
 
         let handle =
             load_context.add_labeled_asset(FbxAssetLabel::Node(index).to_string(), fbx_node);
 
-        node_map.insert(ufbx_node.element.element_id, handle.clone());
-        handles_by_index.push(handle.clone());
         nodes.push(handle.clone());
-
         if !ufbx_node.element.name.is_empty() {
             named_nodes.insert(Box::from(ufbx_node.element.name.as_ref()), handle);
         }
     }
-
-    // Fill children using parent links (second labeled assets with updated data).
-    // We cannot mutate existing assets; store hierarchy only in the WorldAsset.
-    let _ = handles_by_index;
-
-    let (skins, named_skins, skin_data_by_mesh_element) =
-        process_skins(scene, &node_map, load_context)?;
 
     Ok(ProcessedNodes {
         nodes,
@@ -84,6 +105,7 @@ type SkinProcessResult = (
     Vec<Handle<FbxSkin>>,
     HashMap<Box<str>, Handle<FbxSkin>>,
     HashMap<u32, FbxSkin>,
+    HashMap<u32, Handle<FbxSkin>>,
 );
 
 pub fn process_skins(
@@ -94,6 +116,7 @@ pub fn process_skins(
     let mut skins = Vec::new();
     let mut named_skins = HashMap::new();
     let mut skin_data_by_mesh_element = HashMap::new();
+    let mut skin_handles_by_mesh_element = HashMap::new();
     let mut skin_index = 0usize;
 
     for node in scene.nodes.as_ref().iter() {
@@ -181,6 +204,7 @@ pub fn process_skins(
             format!("{}_Skin", node.element.name)
         };
 
+        let extras = props_to_extras(&skin_deformer.element.props);
         let fbx_skin = FbxSkin {
             index: skin_index,
             name: skin_name.clone(),
@@ -188,12 +212,14 @@ pub fn process_skins(
             joint_element_ids,
             mesh_element_id: node.element.element_id,
             inverse_bind_matrices: inverse_bindposes_handle,
+            extras,
         };
 
         skin_data_by_mesh_element.insert(node.element.element_id, fbx_skin.clone());
         let handle =
             load_context.add_labeled_asset(FbxAssetLabel::Skin(skin_index).to_string(), fbx_skin);
 
+        skin_handles_by_mesh_element.insert(node.element.element_id, handle.clone());
         skins.push(handle.clone());
         if !skin_name.starts_with("Skin_") {
             named_skins.insert(Box::from(skin_name.as_str()), handle);
@@ -201,5 +227,10 @@ pub fn process_skins(
         skin_index += 1;
     }
 
-    Ok((skins, named_skins, skin_data_by_mesh_element))
+    Ok((
+        skins,
+        named_skins,
+        skin_data_by_mesh_element,
+        skin_handles_by_mesh_element,
+    ))
 }

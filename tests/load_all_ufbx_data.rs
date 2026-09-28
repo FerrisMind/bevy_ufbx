@@ -88,7 +88,7 @@ fn try_process_fbx(path: &Path) -> Result<(), String> {
         if mat.element.element_id == 0 {
             continue;
         }
-        create_standard_material(mat, &no_textures)
+        create_standard_material(mat, &no_textures, bevy::asset::RenderAssetUsages::default())
             .map_err(|e| format!("material '{}': {e:?}", mat.element.name))?;
     }
 

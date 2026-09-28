@@ -4,7 +4,10 @@ use crate::error::FbxError;
 use crate::label::FbxAssetLabel;
 use crate::loader::FbxLoaderSettings;
 use crate::utils::convert_texture_uv_transform;
-use bevy::asset::{Handle, LoadContext};
+use bevy::asset::{Handle, LoadContext, RenderAssetUsages};
+use bevy::image::{
+    CompressedImageFormats, ImageAddressMode, ImageSampler, ImageSamplerDescriptor, ImageType,
+};
 use bevy::material::AlphaMode;
 use bevy::pbr::StandardMaterial;
 use bevy::prelude::*;
@@ -18,19 +21,20 @@ type MaterialHandles = (
 /// Process all materials from the FBX scene.
 pub fn process_materials(
     scene: &ufbx::Scene,
-    _settings: &FbxLoaderSettings,
+    settings: &FbxLoaderSettings,
     load_context: &mut LoadContext,
 ) -> Result<MaterialHandles, FbxError> {
     let mut materials = Vec::new();
     let mut named_materials = HashMap::new();
-    let texture_handles = process_textures(scene, load_context)?;
+    let texture_handles = process_textures(scene, settings, load_context)?;
 
     for (index, ufbx_material) in scene.materials.as_ref().iter().enumerate() {
         if ufbx_material.element.element_id == 0 {
             continue;
         }
 
-        let standard_material = create_standard_material(ufbx_material, &texture_handles)?;
+        let standard_material =
+            create_standard_material(ufbx_material, &texture_handles, settings.load_materials)?;
         let handle = load_context.add_labeled_asset(
             FbxAssetLabel::Material(index).to_string(),
             standard_material,
@@ -49,122 +53,176 @@ pub fn process_materials(
     Ok((materials, named_materials))
 }
 
-/// Process textures from materials.
+fn wrap_to_address_mode(mode: ufbx::WrapMode) -> ImageAddressMode {
+    match mode {
+        ufbx::WrapMode::Clamp => ImageAddressMode::ClampToEdge,
+        ufbx::WrapMode::Repeat => ImageAddressMode::Repeat,
+    }
+}
+
+/// Process textures: embedded content first, then external / `.fbm` paths.
 pub fn process_textures(
     scene: &ufbx::Scene,
+    settings: &FbxLoaderSettings,
     load_context: &mut LoadContext,
-) -> Result<HashMap<u32, Handle<bevy::prelude::Image>>, FbxError> {
+) -> Result<HashMap<u32, Handle<Image>>, FbxError> {
     let mut texture_handles = HashMap::new();
 
     for texture in scene.textures.as_ref().iter() {
+        let sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+            address_mode_u: wrap_to_address_mode(texture.wrap_u),
+            address_mode_v: wrap_to_address_mode(texture.wrap_v),
+            ..ImageSamplerDescriptor::default()
+        });
+
+        // Embedded binary content.
+        if !texture.content.is_empty() {
+            let ext = extension_hint(texture);
+            let image_type = ImageType::Extension(ext);
+            match Image::from_buffer(
+                texture.content.as_ref(),
+                image_type,
+                CompressedImageFormats::NONE,
+                true,
+                sampler.clone(),
+                settings.load_materials,
+            ) {
+                Ok(image) => {
+                    let handle = load_context.add_labeled_asset(
+                        FbxAssetLabel::Texture(texture.element.element_id as usize).to_string(),
+                        image,
+                    );
+                    texture_handles.insert(texture.element.element_id, handle);
+                    continue;
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to decode embedded texture '{}': {e}",
+                        texture.filename
+                    );
+                }
+            }
+        }
+
+        let relative_path = resolve_texture_relative_path(texture);
+        if relative_path.is_empty() {
+            continue;
+        }
+
         let asset_path = load_context.path();
         let fbx_dir = asset_path
             .path()
             .parent()
             .unwrap_or_else(|| std::path::Path::new(""));
+        let texture_path = fbx_dir
+            .join(relative_path)
+            .to_string_lossy()
+            .to_string();
 
-        // Construct relative path for Bevy's asset system
-        // Preserves .fbm folder structure if present (e.g., "model.fbm/texture.jpg")
-        let relative_path = if !texture.filename.is_empty() {
-            let filename = texture.filename.as_ref();
-
-            // Check if filename contains an absolute path (Unix or Windows style)
-            // Windows paths can have either : followed by / or \
-            let is_absolute = filename.starts_with('/')
-                || (filename.len() >= 3 && filename.chars().nth(1) == Some(':'));
-
-            if is_absolute {
-                // Extract relative path from absolute path
-                // Look for .fbm folder (FBX's standard embedded texture directory)
-                if let Some(fbm_pos) = filename.rfind(".fbm/").or_else(|| filename.rfind(".fbm\\"))
-                {
-                    // Find the start of the .fbm folder name
-                    let before_fbm = &filename[..fbm_pos];
-                    let folder_start = before_fbm
-                        .rfind(&['/', '\\'][..])
-                        .map(|p| p + 1)
-                        .unwrap_or(0);
-                    // Extract from folder name onwards: "model.fbm/texture.jpg"
-                    &filename[folder_start..]
-                } else {
-                    // No .fbm folder, extract just the filename
-                    let last_slash = filename.rfind(&['/', '\\'][..]);
-                    if let Some(pos) = last_slash {
-                        &filename[pos + 1..]
-                    } else {
-                        filename
-                    }
-                }
-            } else {
-                // Use as-is (already relative)
-                filename
-            }
-        } else if !texture.absolute_filename.is_empty() {
-            let abs_path = texture.absolute_filename.as_ref();
-            // Extract relative path from absolute_filename
-            // Look for .fbm folder
-            if let Some(fbm_pos) = abs_path.rfind(".fbm/").or_else(|| abs_path.rfind(".fbm\\")) {
-                let before_fbm = &abs_path[..fbm_pos];
-                let folder_start = before_fbm
-                    .rfind(&['/', '\\'][..])
-                    .map(|p| p + 1)
-                    .unwrap_or(0);
-                &abs_path[folder_start..]
-            } else {
-                // No .fbm folder, extract just the filename
-                let last_slash = abs_path.rfind(&['/', '\\'][..]);
-                if let Some(pos) = last_slash {
-                    &abs_path[pos + 1..]
-                } else {
-                    abs_path
-                }
-            }
-        } else {
-            ""
-        };
-
-        if !relative_path.is_empty() {
-            let texture_path = fbx_dir.join(relative_path).to_string_lossy().to_string();
-
-            let image_handle = load_context.load(texture_path);
-            texture_handles.insert(texture.element.element_id, image_handle);
-        }
+        let image_handle: Handle<Image> = load_context.load(texture_path);
+        texture_handles.insert(texture.element.element_id, image_handle);
     }
 
     Ok(texture_handles)
 }
 
+fn extension_hint(texture: &ufbx::Texture) -> &str {
+    let name = if !texture.filename.is_empty() {
+        texture.filename.as_ref()
+    } else {
+        texture.absolute_filename.as_ref()
+    };
+    std::path::Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("png")
+}
+
+fn resolve_texture_relative_path(texture: &ufbx::Texture) -> &str {
+    let filename = if !texture.filename.is_empty() {
+        texture.filename.as_ref()
+    } else if !texture.absolute_filename.is_empty() {
+        texture.absolute_filename.as_ref()
+    } else {
+        return "";
+    };
+
+    let is_absolute = filename.starts_with('/')
+        || (filename.len() >= 3 && filename.chars().nth(1) == Some(':'));
+
+    if !is_absolute {
+        return filename;
+    }
+
+    if let Some(fbm_pos) = filename.rfind(".fbm/").or_else(|| filename.rfind(".fbm\\")) {
+        let before_fbm = &filename[..fbm_pos];
+        let folder_start = before_fbm
+            .rfind(['/', '\\'])
+            .map(|p| p + 1)
+            .unwrap_or(0);
+        &filename[folder_start..]
+    } else {
+        let last_slash = filename.rfind(['/', '\\']);
+        if let Some(pos) = last_slash {
+            &filename[pos + 1..]
+        } else {
+            filename
+        }
+    }
+}
+
 /// Create a StandardMaterial from ufbx material.
 pub fn create_standard_material(
     ufbx_material: &ufbx::Material,
-    texture_handles: &HashMap<u32, Handle<bevy::prelude::Image>>,
+    texture_handles: &HashMap<u32, Handle<Image>>,
+    _usages: RenderAssetUsages,
 ) -> Result<StandardMaterial, FbxError> {
     let mut material = StandardMaterial::default();
 
-    // Base color
-    if let Ok(diffuse) = std::panic::catch_unwind(|| ufbx_material.fbx.diffuse_color.value_vec4) {
+    // Only apply maps that ufbx marked as present. Unset PBR scalars are often
+    // 0.0 — writing them over Bevy defaults (e.g. roughness 0.5) makes Lambert
+    // materials into black mirrors under dark HDR environments.
+    if ufbx_material.fbx.diffuse_color.has_value {
+        let diffuse = ufbx_material.fbx.diffuse_color.value_vec4;
         material.base_color = Color::srgb(diffuse.x as f32, diffuse.y as f32, diffuse.z as f32);
-    } else if let Ok(pbr_base) =
-        std::panic::catch_unwind(|| ufbx_material.pbr.base_color.value_vec4)
-    {
+    } else if ufbx_material.pbr.base_color.has_value {
+        let pbr_base = ufbx_material.pbr.base_color.value_vec4;
         material.base_color = Color::srgb(pbr_base.x as f32, pbr_base.y as f32, pbr_base.z as f32);
     }
 
-    // Metallic and roughness
-    if let Ok(metallic) = std::panic::catch_unwind(|| ufbx_material.pbr.metalness.value_vec4) {
-        material.metallic = metallic.x as f32;
+    if ufbx_material.pbr.metalness.has_value {
+        material.metallic = ufbx_material.pbr.metalness.value_vec4.x as f32;
     }
-    if let Ok(roughness) = std::panic::catch_unwind(|| ufbx_material.pbr.roughness.value_vec4) {
-        material.perceptual_roughness = roughness.x as f32;
+    if ufbx_material.pbr.roughness.has_value {
+        material.perceptual_roughness = ufbx_material.pbr.roughness.value_vec4.x as f32;
     }
 
-    // Emission
-    if let Ok(emission) = std::panic::catch_unwind(|| ufbx_material.fbx.emission_color.value_vec4) {
+    if ufbx_material.fbx.emission_color.has_value {
+        let emission = ufbx_material.fbx.emission_color.value_vec4;
         material.emissive =
             LinearRgba::rgb(emission.x as f32, emission.y as f32, emission.z as f32);
     }
 
-    // Alpha
+    // Clearcoat / transmission / IOR when present on the ufbx PBR maps.
+    if ufbx_material.features.coat.enabled {
+        material.clearcoat = ufbx_material.pbr.coat_factor.value_vec4.x as f32;
+        material.clearcoat_perceptual_roughness =
+            ufbx_material.pbr.coat_roughness.value_vec4.x as f32;
+    }
+    if ufbx_material.features.transmission.enabled {
+        material.specular_transmission = ufbx_material.pbr.transmission_factor.value_vec4.x as f32;
+    }
+    if ufbx_material.features.ior.enabled {
+        let ior = ufbx_material.pbr.specular_ior.value_vec4.x as f32;
+        if ior > 0.0 {
+            material.ior = ior;
+        }
+    }
+    if ufbx_material.features.double_sided.enabled {
+        material.double_sided = true;
+        material.cull_mode = None;
+    }
+
     if ufbx_material.pbr.opacity.value_vec4.x < 1.0 {
         let alpha = ufbx_material.pbr.opacity.value_vec4.x as f32;
         material.alpha_mode = if alpha < 0.98 {
@@ -174,7 +232,6 @@ pub fn create_standard_material(
         };
     }
 
-    // Textures
     for texture_ref in &ufbx_material.textures {
         if let Some(image_handle) = texture_handles.get(&texture_ref.texture.element.element_id) {
             match texture_ref.material_prop.as_ref() {
@@ -183,8 +240,7 @@ pub fn create_standard_material(
                     material.uv_transform = convert_texture_uv_transform(&texture_ref.texture);
                 }
                 "NormalMap" => material.normal_map_texture = Some(image_handle.clone()),
-                "Metallic" => material.metallic_roughness_texture = Some(image_handle.clone()),
-                "Roughness" if material.metallic_roughness_texture.is_none() => {
+                "Metallic" | "Roughness" | "MetallicRoughness" => {
                     material.metallic_roughness_texture = Some(image_handle.clone());
                 }
                 "EmissiveColor" => material.emissive_texture = Some(image_handle.clone()),

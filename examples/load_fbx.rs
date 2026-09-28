@@ -13,7 +13,7 @@
 
 use bevy::prelude::*;
 use bevy::world_serialization::WorldAssetRoot;
-use bevy_ufbx::{Fbx, FbxLoaderSettings, FbxPlugin};
+use bevy_ufbx::FbxPlugin;
 
 fn main() {
     App::new()
@@ -28,9 +28,6 @@ fn main() {
 
 #[derive(Component)]
 struct Spinning;
-
-#[derive(Resource)]
-struct FbxHandle(Handle<Fbx>);
 
 // ── Setup ───────────────────────────────────────────────────────────────────
 

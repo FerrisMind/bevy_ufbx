@@ -3,10 +3,9 @@
 use crate::error::FbxError;
 use crate::label::FbxAssetLabel;
 use crate::loader::{FbxLoaderSettings, FbxSkinnedMeshBoundsPolicy};
-use crate::names::{
-    animation_name_path, animation_root_typed_ids, is_ancestor_of, node_name_component,
-    node_typed_id,
-};
+#[cfg(feature = "animation")]
+use crate::names::{animation_name_path, animation_root_typed_ids, is_ancestor_of};
+use crate::names::{node_name_component, node_typed_id};
 use crate::types::{
     FbxExtras, FbxMaterialExtras, FbxMaterialName, FbxMeshExtras, FbxMeshName, FbxSceneExtras,
     FbxSceneName, FbxSkin, NodeMeshPrimitive,
@@ -83,6 +82,35 @@ pub fn build_scene(
     let mut element_to_entity: HashMap<u32, Entity> = HashMap::new();
     let mut typed_id_to_entity: HashMap<u32, Entity> = HashMap::new();
 
+    // The synthetic ufbx root (`is_root`) is not a real FBX node: it exists only to
+    // carry space conversion. `FbxSpaceConversion::TransformRoot` (and a custom
+    // `LoadOpts::root_transform`) stores the whole unit/axis conversion in
+    // `scene.root_node->local_transform` and nowhere else (ufbx
+    // `ufbxi_setup_root_node` + `ufbx_space_conversion`), so skipping it silently
+    // drops the requested conversion. Spawn it as a wrapper entity: real nodes keep
+    // their local TRS untouched, and baked animation curves address real nodes only
+    // (path policy A in `names.rs` never includes the synthetic root), so animation
+    // can never overwrite the conversion. When the conversion is identity — the
+    // `Auto` / `ModifyGeometry` / `AdjustTransforms` common path — no wrapper is
+    // spawned and the hierarchy is exactly as before.
+    let synthetic_root_entity: Option<Entity> = {
+        let transform = convert_transform(&scene.root_node.local_transform);
+        if transform == Transform::IDENTITY {
+            None
+        } else {
+            Some(
+                world
+                    .spawn((
+                        transform,
+                        GlobalTransform::default(),
+                        Visibility::Inherited,
+                        Name::new("FbxSceneRoot"),
+                    ))
+                    .id(),
+            )
+        }
+    };
+
     for u_node in scene.nodes.as_ref().iter() {
         if u_node.is_root {
             continue;
@@ -115,13 +143,16 @@ pub fn build_scene(
         let Some(&child) = typed_id_to_entity.get(&node_typed_id(u_node)) else {
             continue;
         };
-        if let Some(parent_ref) = u_node.parent.as_ref() {
-            if parent_ref.is_root {
-                continue;
+        // Children of the synthetic ufbx root — and any parentless outlier nodes —
+        // hang under the wrapper so the space conversion reaches them.
+        let parent = match u_node.parent.as_ref() {
+            Some(parent_ref) if !parent_ref.is_root => {
+                typed_id_to_entity.get(&node_typed_id(parent_ref)).copied()
             }
-            if let Some(&parent) = typed_id_to_entity.get(&node_typed_id(parent_ref)) {
-                world.entity_mut(parent).add_child(child);
-            }
+            _ => synthetic_root_entity,
+        };
+        if let Some(parent) = parent {
+            world.entity_mut(parent).add_child(child);
         }
     }
 
@@ -429,6 +460,40 @@ fn material_extras_for_primitive(
     None
 }
 
+/// FBX cone-angle range in degrees (Autodesk FBX SDK `KFbxLight`).
+const FBX_MAX_CONE_ANGLE_DEGREES: f32 = 160.0;
+/// FBX ConeAngle/OuterAngle default in degrees when the file omits the property.
+/// ufbx reports the raw property (0.0 when absent); the FBX SDK default is 45.
+const FBX_DEFAULT_CONE_ANGLE_DEGREES: f32 = 45.0;
+
+/// Convert an FBX **full** cone aperture in degrees to a Bevy half-angle in radians.
+fn cone_degrees_to_half_radians(degrees: f32) -> f32 {
+    (degrees * 0.5).to_radians()
+}
+
+/// Resolve ufbx spot cone angles to Bevy [`SpotLight`] angles.
+///
+/// ufbx stores the raw FBX `InnerAngle`/`OuterAngle`/`ConeAngle` properties unchanged: **full**
+/// cone aperture angles in degrees (FBX SDK: range 0..160, default 45; Blender's `io_scene_fbx`
+/// maps `OuterAngle` directly onto its full-angle `spot_size`). Bevy's `SpotLight.inner_angle` /
+/// `outer_angle` are **half** angles from the light axis in radians — `spot_light_clip_from_view`
+/// projects `outer_angle * 2.0` as the FOV (`bevy_light::spot_light`) — so the full aperture must
+/// be halved before the degree→radian conversion.
+///
+/// `outer_angle == 0.0` means the property was absent (ufbx default), which per the FBX SDK means
+/// the default 45 degree cone; larger-than-range values are clamped so the half angle stays below
+/// `PI / 2` (Bevy requires it). The inner angle is clamped into `[0, outer]`.
+fn bevy_spot_cone_angles(inner_degrees: f32, outer_degrees: f32) -> (f32, f32) {
+    let outer_full = if outer_degrees > 0.0 {
+        outer_degrees.min(FBX_MAX_CONE_ANGLE_DEGREES)
+    } else {
+        FBX_DEFAULT_CONE_ANGLE_DEGREES
+    };
+    let outer = cone_degrees_to_half_radians(outer_full);
+    let inner = cone_degrees_to_half_radians(inner_degrees.max(0.0)).min(outer);
+    (inner, outer)
+}
+
 fn insert_light(mut entity: EntityWorldMut, light: &ufbx::Light) {
     let color = Color::srgb(
         light.color.x as f32,
@@ -453,12 +518,14 @@ fn insert_light(mut entity: EntityWorldMut, light: &ufbx::Light) {
             });
         }
         ufbx::LightType::Spot => {
+            let (inner_angle, outer_angle) =
+                bevy_spot_cone_angles(light.inner_angle as f32, light.outer_angle as f32);
             entity.insert(SpotLight {
                 color,
                 intensity: light.intensity as f32 * 1000.0,
                 shadow_maps_enabled: light.cast_shadows,
-                inner_angle: light.inner_angle as f32,
-                outer_angle: light.outer_angle as f32,
+                inner_angle,
+                outer_angle,
                 ..Default::default()
             });
         }
@@ -515,4 +582,63 @@ fn insert_camera(mut entity: EntityWorldMut, camera: &ufbx::Camera) {
             ..Default::default()
         },
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// FBX files store **full** cone aperture degrees; Bevy wants radius half-angles.
+    #[test]
+    fn fbx_cone_full_aperture_becomes_bevy_half_angle_radians() {
+        let (inner, outer) = bevy_spot_cone_angles(0.0, 45.0);
+        assert_eq!(inner, 0.0);
+        assert!(
+            (outer - core::f32::consts::FRAC_PI_8).abs() < 1e-6,
+            "45 degree full aperture must be 22.5 degrees half = PI/8 rad, got {outer}"
+        );
+
+        let (inner, outer) = bevy_spot_cone_angles(60.0, 90.0);
+        assert!(
+            (outer - core::f32::consts::FRAC_PI_4).abs() < 1e-6,
+            "90 degree full aperture must be 45 degrees half = PI/4 rad, got {outer}"
+        );
+        assert!(
+            (inner - cone_degrees_to_half_radians(60.0)).abs() < 1e-6,
+            "60 degree inner full aperture must be 30 degrees half, got {inner}"
+        );
+        assert!(inner <= outer);
+    }
+
+    /// A missing property is 0.0 in ufbx; the FBX SDK default cone (45 degrees) applies.
+    #[test]
+    fn missing_fbx_cone_angle_uses_sdk_default() {
+        let (inner, outer) = bevy_spot_cone_angles(0.0, 0.0);
+        assert_eq!(inner, 0.0);
+        assert!(
+            (outer - cone_degrees_to_half_radians(FBX_DEFAULT_CONE_ANGLE_DEGREES)).abs() < 1e-6,
+            "missing cone angle must fall back to the FBX 45 degree default, got {outer}"
+        );
+        assert!(
+            outer > 0.0,
+            "a spot light must never get a degenerate zero cone"
+        );
+    }
+
+    /// Values outside the documented FBX range are clamped; Bevy requires outer < PI/2 and inner <= outer.
+    #[test]
+    fn out_of_range_fbx_cone_angles_are_clamped() {
+        let (_inner, outer) = bevy_spot_cone_angles(0.0, 350.0);
+        assert!(
+            outer < core::f32::consts::FRAC_PI_2,
+            "clamped outer half-angle must stay below PI/2, got {outer}"
+        );
+        assert!((outer - cone_degrees_to_half_radians(160.0)).abs() < 1e-6);
+
+        let (inner, outer) = bevy_spot_cone_angles(120.0, 45.0);
+        assert_eq!(inner, outer, "inner must not exceed outer");
+
+        let (inner, _) = bevy_spot_cone_angles(-10.0, 45.0);
+        assert_eq!(inner, 0.0, "negative inner angle clamps to zero");
+    }
 }

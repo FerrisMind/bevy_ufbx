@@ -124,8 +124,15 @@ impl Default for FbxLoaderSettings {
 }
 
 /// Loader implementation for FBX files.
+///
+/// The [`Self::default_sampler`] handle is shared with the plugin-level
+/// [`crate::DefaultFbxImageSampler`] resource, so mutating that resource affects
+/// subsequent loads without re-registering the loader.
 #[derive(Default, bevy::reflect::TypePath)]
-pub struct FbxLoader;
+pub struct FbxLoader {
+    /// Plugin-level default sampler, shared with [`crate::DefaultFbxImageSampler`].
+    pub default_sampler: std::sync::Arc<std::sync::Mutex<ImageSamplerDescriptor>>,
+}
 
 impl AssetLoader for FbxLoader {
     type Asset = Fbx;
@@ -138,6 +145,16 @@ impl AssetLoader for FbxLoader {
         settings: &Self::Settings,
         load_context: &mut LoadContext<'_>,
     ) -> Result<Fbx, FbxError> {
+        // Fold the plugin-level sampler default into the per-load settings so
+        // every downstream consumer sees one effective base sampler. The
+        // per-load value wins whenever it was explicitly set.
+        let mut effective_settings = settings.clone();
+        effective_settings.default_sampler = crate::resolve_default_sampler(
+            &self.default_sampler,
+            &settings.default_sampler,
+        );
+        let settings = &effective_settings;
+
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;
 

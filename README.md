@@ -37,20 +37,43 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
 
 ## Animation
 
-Stacks are baked with `ufbx::bake_anim` into labeled `AnimationClip`s (TRS + morph `WeightsCurve`). The loader does **not** auto-play — build an `AnimationGraph` in your app.
+Stacks are baked with `ufbx::bake_anim` into labeled `AnimationClip`s (TRS + morph `WeightsCurve`).
+Sampling rate is controlled by `FbxLoaderSettings::bake_fps` (default **30.0**, maps to
+`BakeOpts::resample_rate` and morph-weight sample density). The loader does **not** auto-play —
+build an `AnimationGraph` in your app.
+
+Optional rest/bind clip: set `generate_rest_animation: true` to also emit a clip labeled
+`AnimationRest` / named `"Rest"` with a single keyframe at `t = 0` for each animated node's
+rest local transform (and morph weights when present). Useful for character workflows
+(Godot-style rest pose); off by default so existing take indices stay unchanged.
 
 Clips are labeled `Animation{N}` only (Bevy cannot attach two labels to one asset). Look up takes by name on the loaded `Fbx`:
 
 ```rust
-use bevy_ufbx::{Fbx, FbxAssetLabel};
+use bevy_ufbx::{Fbx, FbxAssetLabel, FbxLoaderSettings};
 
 // By index label:
 let clip = asset_server.load(FbxAssetLabel::Animation(0).from_asset("cube_anim.fbx"));
 
+// Optional rest/bind (requires generate_rest_animation on load):
+// let rest = asset_server.load(FbxAssetLabel::AnimationRest.from_asset("character.fbx"));
+
 // By take name (after the Fbx asset is loaded):
 // let clip = fbx.named_animations["Take 001"].clone();
+// let rest = fbx.named_animations["Rest"].clone();
 
 let (graph, index) = AnimationGraph::from_clip(clip);
+```
+
+```rust
+// Enable rest clip + custom bake rate:
+let fbx: Handle<Fbx> = asset_server
+    .load_builder()
+    .with_settings(|s: &mut FbxLoaderSettings| {
+        s.bake_fps = 30.0;
+        s.generate_rest_animation = true;
+    })
+    .load("character.fbx");
 ```
 
 ## Units / coordinate conversion
@@ -91,6 +114,7 @@ See [NOTES.md](NOTES.md).
 | `Material{N}/Standard` | `StandardMaterial` (non-inverted) |
 | `Material{N} (inverted)` | `StandardMaterial` (cull-flipped) |
 | `Animation{N}` | `AnimationClip` |
+| `AnimationRest` | `AnimationClip` (rest/bind; only if `generate_rest_animation`) |
 | `Node{N}` | `FbxNode` |
 | `Skin{N}` | `FbxSkin` |
 | `Skin{N}/InverseBindMatrices` | `SkinnedMeshInverseBindposes` |
@@ -99,10 +123,30 @@ See [NOTES.md](NOTES.md).
 
 ## Examples
 
+GUI launcher (lists every example, optional args, log, Stop):
+
 ```sh
+python run_examples_gui.py
+```
+
+Visual demos (each proves a runtime feature you can see):
+
+```sh
+cargo run --example morph_fbx              # blend shapes (opaque Maya Lambert)
+cargo run --example animated_mesh_fbx      # baked TRS take via AnimationGraph
+cargo run --example skinned_mesh_fbx       # LBS skin + joint anim (sausage / rigged_triangle)
+cargo run --example nurbs_fbx              # NURBS tessellated to Mesh, spinning
+cargo run --example static_mesh_fbx        # hierarchy + materials + units (Suzanne / cube)
+cargo run --example multimaterial_fbx      # material-split primitives (color regions)
+cargo run --example nested_meshes_fbx      # nested mesh hierarchy (cube/cone/ico/plane)
+cargo run --example textures_fbx           # embedded textures + wrap
+cargo run --example lights_cameras_fbx     # FBX DirectionalLight + activated Camera3d
+cargo run --example vertex_color_fbx       # Mesh ATTRIBUTE_COLOR (ZBrush painted verts)
+cargo run --example neg_scale_fbx          # mirrored mesh → Material{N} (inverted) cull
+cargo run --example showcase_fbx           # morph | anim | nurbs | skin | multi-mat
+cargo run --example load_fbx               # generic CLI loader (defaults to cube.fbx)
 cargo run --example load_fbx -- cube.fbx
-cargo run --example animated_mesh_fbx
-cargo run --example morph_fbx
+cargo run --example dump_fbx -- cube.fbx   # headless asset dump
 ```
 
 ## License

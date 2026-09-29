@@ -26,6 +26,7 @@ Match what `bevy_gltf` exposes at runtime, fed by ufbx — not 1:1 Autodesk FBX 
 - Texture samplers: FBX `wrap_u` / `wrap_v` → address modes; mag/min/mip from `FbxLoaderSettings::default_sampler` (or full replace via `override_sampler`) — ufbx 0.9 has no filter fields
 - Blender PBR: `use_blender_pbr_material` when probe exporter is Blender binary/ascii
 - Anim takes: `Animation{N}` labels + `Fbx.named_animations["Take 001"]` map (no second name label)
+- `bake_fps` (default 30) → `BakeOpts::resample_rate` + morph sampling; optional `generate_rest_animation` → `AnimationRest` / `"Rest"`
 
 ## Engine-impossible / bake-only
 
@@ -47,10 +48,26 @@ Maya centimetre fixtures correctly become ~1 cm in world metres — examples may
 
 ## Fixtures
 
-- `assets/cube_anim.fbx` — transform take
-- `assets/rigged_triangle.fbx` — skin
-- `assets/blend_shape_cube.fbx` — morphs
-- `assets/nurbs_saddle.fbx` — NURBS tessellate
+Local `assets/` (visual examples + tests):
+
+| File | Proves |
+|------|--------|
+| `blend_shape_cube.fbx` | morph / blend shapes (`morph_fbx`) |
+| `cube_anim.fbx` / `cube_anim_bevy.fbx` | TRS bake (`animated_mesh_fbx`) |
+| `cube.fbx` | static mesh / CLI default (`load_fbx`, `static_mesh_fbx` fallback) |
+| `maya_cube_7400_binary.fbx` | Maya cm cube |
+| `nurbs_saddle.fbx` | NURBS tessellate (`nurbs_fbx`) |
+| `rigged_triangle.fbx` | skin IBM / fallback for `skinned_mesh_fbx` |
+| `blender_279_sausage_7400_binary.fbx` | skinned character-ish + takes (`skinned_mesh_fbx`, `showcase_fbx`) |
+| `blender_279_internal_textures_7400_binary.fbx` | embedded textures (`textures_fbx`) |
+| `blender_282_suzanne_7400_binary.fbx` | Blender AdjustTransforms static mesh |
+| `blender_279_nested_meshes_7400_binary.fbx` | nested mesh hierarchy (`nested_meshes_fbx`) |
+| `blender_suzanne_multimaterial_7400_binary.fbx` | material-split primitives / color regions (`multimaterial_fbx`, `showcase_fbx`) |
+| `maya_camera_light_axes_y_up_6100_binary.fbx` | lights + inactive camera (no mesh; `lights_cameras_fbx`) |
+| `zbrush_vertex_color_7500_ascii.fbx` | vertex colors / `ATTRIBUTE_COLOR` (`vertex_color_fbx`) |
+| `blender_340_mirrored_normals_7400_binary.fbx` | neg world scale → inverted cull (`neg_scale_fbx`) |
+
+Copied from `libs/ufbx/data/` where noted; do not invent fixtures.
 
 ## Non-goals
 

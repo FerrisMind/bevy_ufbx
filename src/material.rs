@@ -248,17 +248,19 @@ fn resolve_texture_relative_path(texture: &ufbx::Texture) -> &str {
     }
 }
 
-/// Resolve scalar opacity when ufbx marked opacity/transparency as present.
+/// Resolve scalar opacity only when ufbx marked `pbr.opacity` as present.
 ///
-/// Prefers `pbr.opacity`; falls back to `1 - fbx.transparency_factor` (Godot-like).
+/// Do **not** fall back to raw `fbx.transparency_factor`: Maya Lambert often
+/// exports `TransparencyFactor=1` with black `TransparentColor`, which is
+/// opaque. Effective opacity is `factor * color`; ufbx already folds that into
+/// `pbr.opacity` and only sets `has_value` when transparency is real. Using
+/// `1 - transparency_factor` alone made opaque cubes fully invisible (alpha 0).
 fn resolve_opacity_alpha(ufbx_material: &ufbx::Material) -> Option<f32> {
     if ufbx_material.pbr.opacity.has_value {
-        return Some(ufbx_material.pbr.opacity.value_vec4.x as f32);
+        Some(ufbx_material.pbr.opacity.value_vec4.x as f32)
+    } else {
+        None
     }
-    if ufbx_material.fbx.transparency_factor.has_value {
-        return Some(1.0 - ufbx_material.fbx.transparency_factor.value_vec4.x as f32);
-    }
-    None
 }
 
 /// Create a StandardMaterial from ufbx material.

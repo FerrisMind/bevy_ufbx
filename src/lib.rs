@@ -68,6 +68,19 @@ impl Plugin for FbxPlugin {
             .register_type::<FbxSceneExtras>()
             .register_type::<FbxMeshExtras>()
             .register_type::<FbxMaterialExtras>();
+
+        // Register the loader in `build`, not `finish` (where `bevy_gltf`
+        // registers `GltfLoader`): `FbxLoader` needs no finish-time data — the
+        // compressed-format support is read lazily via
+        // [`cached_supported_compressed_formats`], which [`Self::finish`] fills
+        // once the render device is known. Registering here keeps FBX loading
+        // working in `App::update`-only harnesses (tests, custom runners) that
+        // never call `App::finish`, with no behavioral difference for apps.
+        let default_sampler = app
+            .world()
+            .resource::<DefaultFbxImageSampler>()
+            .get_internal();
+        app.register_asset_loader(FbxLoader { default_sampler });
     }
 
     fn finish(&self, app: &mut App) {
@@ -79,8 +92,10 @@ impl Plugin for FbxPlugin {
         {
             resource.0
         } else {
-            warn!("CompressedImageFormatSupport resource not found. It should either be initialized in finish() of \
-            RenderPlugin, or manually if not using the RenderPlugin or the WGPU backend.");
+            warn!(
+                "CompressedImageFormatSupport resource not found. It should either be initialized in finish() of \
+            RenderPlugin, or manually if not using the RenderPlugin or the WGPU backend."
+            );
             CompressedImageFormats::NONE
         };
 
@@ -90,14 +105,6 @@ impl Plugin for FbxPlugin {
         // Load-time code (the asset loader) has no ECS access; cache the value
         // for `cached_supported_compressed_formats`.
         let _ = SUPPORTED_COMPRESSED_FORMATS.set(supported_compressed_formats);
-
-        // Register the loader here (mirroring `bevy_gltf`) so it can share the
-        // plugin-level sampler default inserted in `build`.
-        let default_sampler = app
-            .world()
-            .resource::<DefaultFbxImageSampler>()
-            .get_internal();
-        app.register_asset_loader(FbxLoader { default_sampler });
     }
 }
 
@@ -126,7 +133,7 @@ impl Plugin for FbxPlugin {
 ///    per-load default is left at its default value.
 ///
 /// The resolved base is what [`FbxLoaderSettings::default_sampler`] would
-/// otherwise be; [`crate::resolve_default_sampler`] performs steps 2-3.
+/// otherwise be; `resolve_default_sampler` performs steps 2-3.
 ///
 /// Unlike a per-load setting, changes made through [`Self::set`] apply to all
 /// subsequent loads without reloading plugin state; assets already loaded keep
@@ -198,7 +205,7 @@ pub(crate) fn resolve_default_sampler(
 /// stays `NONE` (with a warning) when the `RenderPlugin` is not used.
 ///
 /// Load-time code has no ECS access and should prefer
-/// [`cached_supported_compressed_formats`].
+/// `cached_supported_compressed_formats`.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FbxCompressedImageFormatSupport(pub CompressedImageFormats);
 
@@ -213,9 +220,8 @@ static SUPPORTED_COMPRESSED_FORMATS: OnceLock<CompressedImageFormats> = OnceLock
 ///
 /// Backed by a process-wide cache set once by the first finished plugin; ECS
 /// code should read the [`FbxCompressedImageFormatSupport`] resource instead.
-// Consumed by texture processing (material/texture.rs); see
-// .swarm/results/wave1-plugin.md until then.
-#[allow(dead_code)]
+// Consumed by texture processing (material/texture.rs), which the asset loader
+// calls without ECS access.
 pub(crate) fn cached_supported_compressed_formats() -> CompressedImageFormats {
     *SUPPORTED_COMPRESSED_FORMATS
         .get()
@@ -293,10 +299,7 @@ mod tests {
         plugin_default.address_mode_u = ImageAddressMode::MirrorRepeat;
         let resource = DefaultFbxImageSampler::new(&plugin_default);
         assert_eq!(
-            resolve_default_sampler(
-                &resource.get_internal(),
-                &ImageSamplerDescriptor::default()
-            ),
+            resolve_default_sampler(&resource.get_internal(), &ImageSamplerDescriptor::default()),
             plugin_default
         );
     }
@@ -308,9 +311,7 @@ mod tests {
         app.insert_resource(CompressedImageFormatSupport(CompressedImageFormats::BC));
         FbxPlugin.finish(&mut app);
         assert_eq!(
-            app.world()
-                .resource::<FbxCompressedImageFormatSupport>()
-                .0,
+            app.world().resource::<FbxCompressedImageFormatSupport>().0,
             CompressedImageFormats::BC
         );
         assert_eq!(

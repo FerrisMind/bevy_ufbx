@@ -420,11 +420,12 @@ fn build_standard_material(
     }
 
     // Clearcoat / transmission / IOR when present on the ufbx PBR maps.
-    if material_source.features.coat.enabled {
-        material.clearcoat = material_source.pbr.coat_factor.value_vec4.x as f32;
-        material.clearcoat_perceptual_roughness =
-            material_source.pbr.coat_roughness.value_vec4.x as f32;
-    }
+    apply_coat(
+        &mut material,
+        &material_source.features.coat,
+        &material_source.pbr.coat_factor,
+        &material_source.pbr.coat_roughness,
+    );
     if material_source.features.transmission.enabled {
         material.specular_transmission =
             material_source.pbr.transmission_factor.value_vec4.x as f32;
@@ -435,6 +436,18 @@ fn build_standard_material(
             material.ior = ior;
         }
     }
+    // Specular strength/tint and anisotropy, following the glTF conventions
+    // `bevy_gltf` uses for KHR_materials_specular / KHR_materials_anisotropy.
+    apply_specular(
+        &mut material,
+        &material_source.pbr.specular_factor,
+        &material_source.pbr.specular_color,
+    );
+    apply_specular_anisotropy(
+        &mut material,
+        &material_source.pbr.specular_anisotropy,
+        &material_source.pbr.specular_rotation,
+    );
     if material_source.features.double_sided.enabled {
         material.double_sided = true;
         material.cull_mode = None;
@@ -483,6 +496,66 @@ fn build_standard_material(
     material
 }
 
+/// Clearcoat scalars, applied only when the ufbx coat feature is enabled.
+///
+/// ufbx already folds glossiness-authored maps back into `coat_roughness` (the
+/// `coat_roughness_as_glossiness` feature remap), so the value is perceptual
+/// roughness ready for `StandardMaterial`.
+fn apply_coat(
+    material: &mut StandardMaterial,
+    coat: &ufbx::MaterialFeatureInfo,
+    factor: &ufbx::MaterialMap,
+    roughness: &ufbx::MaterialMap,
+) {
+    if coat.enabled {
+        material.clearcoat = factor.value_vec4.x as f32;
+        material.clearcoat_perceptual_roughness = roughness.value_vec4.x as f32;
+    }
+}
+
+/// Specular strength and tint, mirroring how `bevy_gltf` maps
+/// `KHR_materials_specular` onto `StandardMaterial`: `reflectance =
+/// specular_factor * 0.5` (glTF's specular strength 1.0 corresponds to Bevy's
+/// 4%-reflection default), tint from the specular color.
+///
+/// Each map applies only when the DCC authored it (`has_value`): Lambert has no
+/// specular maps and ufbx leaves unauthored maps unset, so those materials keep
+/// Bevy's reflectance 0.5 / white tint defaults.
+fn apply_specular(
+    material: &mut StandardMaterial,
+    factor: &ufbx::MaterialMap,
+    color: &ufbx::MaterialMap,
+) {
+    if factor.has_value {
+        material.reflectance = factor.value_vec4.x as f32 * 0.5;
+    }
+    if color.has_value {
+        let specular = color.value_vec4;
+        material.specular_tint =
+            Color::linear_rgb(specular.x as f32, specular.y as f32, specular.z as f32);
+    }
+}
+
+/// Anisotropy scalars, mirroring how `bevy_gltf` maps `KHR_materials_anisotropy`.
+///
+/// The scalar fields are unconditional on `StandardMaterial` in Bevy 0.19 (only
+/// `anisotropy_texture` is gated behind bevy_pbr's `pbr_anisotropy_texture`).
+/// ufbx passes the raw authored values through, so the rotation keeps the
+/// exporter's unit convention (glTF-derived materials use radians, Arnold turn
+/// fractions, 3ds Max degrees).
+fn apply_specular_anisotropy(
+    material: &mut StandardMaterial,
+    anisotropy: &ufbx::MaterialMap,
+    rotation: &ufbx::MaterialMap,
+) {
+    if anisotropy.has_value {
+        material.anisotropy_strength = anisotropy.value_vec4.x as f32;
+    }
+    if rotation.has_value {
+        material.anisotropy_rotation = rotation.value_vec4.x as f32;
+    }
+}
+
 /// Alpha mode heuristic: an authored opacity texture with full scalar opacity is
 /// treated as a cutout (FBX transparency maps are usually binary). A scalar
 /// opacity factor below one is bucketed like factor-only opacity, so `Blend`
@@ -516,6 +589,161 @@ mod tests {
         assert!(matches!(alpha_mode_for(0.4, true), AlphaMode::Blend));
         assert!(matches!(alpha_mode_for(0.4, false), AlphaMode::Blend));
         assert!(matches!(alpha_mode_for(1.0, false), AlphaMode::Opaque));
+    }
+
+    /// A scalar ufbx material map carrying `value` (authored when `has_value`).
+    fn scalar_map(value: f64, has_value: bool) -> ufbx::MaterialMap {
+        ufbx::MaterialMap {
+            value_vec4: ufbx::Vec4 {
+                x: value,
+                y: 0.0,
+                z: 0.0,
+                w: 1.0,
+            },
+            value_int: 0,
+            texture: None,
+            has_value,
+            texture_enabled: false,
+            feature_disabled: false,
+            value_components: 1,
+        }
+    }
+
+    /// glTF parity: specular strength maps to `reflectance = factor * 0.5`, and
+    /// an authored specular color tints (black Phong specular kills the tint).
+    #[test]
+    fn specular_factor_maps_to_half_reflectance_and_authored_tint() {
+        let mut material = StandardMaterial::default();
+        apply_specular(
+            &mut material,
+            &scalar_map(0.8, true),
+            &scalar_map(0.0, false),
+        );
+        assert_eq!(material.reflectance, 0.4);
+        assert_eq!(material.specular_tint, Color::WHITE);
+
+        // An unauthored factor must not overwrite the reflectance an earlier
+        // map pass already set; the tint still follows its own map.
+        let mut tinted = scalar_map(0.0, true);
+        tinted.value_vec4 = ufbx::Vec4 {
+            x: 0.25,
+            y: 0.5,
+            z: 0.75,
+            w: 1.0,
+        };
+        apply_specular(&mut material, &scalar_map(0.0, false), &tinted);
+        assert_eq!(material.reflectance, 0.4);
+        assert_eq!(material.specular_tint, Color::linear_rgb(0.25, 0.5, 0.75));
+
+        let mut fresh = StandardMaterial::default();
+        let mut black = scalar_map(0.0, true);
+        black.value_vec4 = ufbx::Vec4 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            w: 1.0,
+        };
+        apply_specular(&mut fresh, &scalar_map(1.0, true), &black);
+        assert_eq!(fresh.reflectance, 0.5);
+        assert_eq!(fresh.specular_tint, Color::linear_rgb(0.0, 0.0, 0.0));
+    }
+
+    /// Anisotropy scalars apply only when ufbx marks the maps as authored;
+    /// unauthored maps keep Bevy's 0.0 defaults.
+    #[test]
+    fn anisotropy_maps_apply_only_when_authored() {
+        let mut material = StandardMaterial::default();
+        apply_specular_anisotropy(
+            &mut material,
+            &scalar_map(0.0, false),
+            &scalar_map(0.0, false),
+        );
+        assert_eq!(material.anisotropy_strength, 0.0);
+        assert_eq!(material.anisotropy_rotation, 0.0);
+
+        apply_specular_anisotropy(
+            &mut material,
+            &scalar_map(0.8, true),
+            &scalar_map(1.25, true),
+        );
+        assert_eq!(material.anisotropy_strength, 0.8);
+        assert_eq!(material.anisotropy_rotation, 1.25);
+    }
+
+    /// Clearcoat scalars follow the `features.coat` gate: a disabled coat must
+    /// leave both Bevy defaults (0.0 / 0.5) untouched.
+    #[test]
+    fn coat_scalars_apply_only_when_the_feature_is_enabled() {
+        let disabled = ufbx::MaterialFeatureInfo {
+            enabled: false,
+            is_explicit: true,
+        };
+        let enabled = ufbx::MaterialFeatureInfo {
+            enabled: true,
+            is_explicit: true,
+        };
+
+        let mut material = StandardMaterial::default();
+        apply_coat(
+            &mut material,
+            &disabled,
+            &scalar_map(1.0, true),
+            &scalar_map(0.25, true),
+        );
+        assert_eq!(material.clearcoat, 0.0);
+        assert_eq!(material.clearcoat_perceptual_roughness, 0.5);
+
+        apply_coat(
+            &mut material,
+            &enabled,
+            &scalar_map(0.7, true),
+            &scalar_map(0.25, true),
+        );
+        assert_eq!(material.clearcoat, 0.7);
+        assert_eq!(material.clearcoat_perceptual_roughness, 0.25);
+    }
+
+    /// `assets/zbrush_vertex_color_7500_ascii.fbx` authors Phong specular: the
+    /// material's `FbxSurfacePhong` property template carries `SpecularFactor=1`
+    /// and the material overrides `SpecularColor` to black. The full
+    /// `build_standard_material` path must produce `reflectance = factor * 0.5`
+    /// and the black linear tint, leaving anisotropy at its defaults.
+    #[test]
+    fn phong_specular_from_the_corpus_maps_to_reflectance_and_tint() {
+        let bytes = include_bytes!("../assets/zbrush_vertex_color_7500_ascii.fbx");
+        let root = ufbx::load_memory(
+            bytes,
+            ufbx::LoadOpts {
+                load_external_files: false,
+                ..Default::default()
+            },
+        )
+        .expect("parse corpus fixture");
+        let material = &root.materials.as_ref()[0];
+
+        assert!(
+            material.pbr.specular_factor.has_value,
+            "fixture must resolve specular (template SpecularFactor=1)"
+        );
+        assert!(
+            material.pbr.specular_color.has_value,
+            "fixture must author SpecularColor"
+        );
+
+        let standard = build_standard_material(material, &MaterialSlots::default());
+        assert_eq!(
+            standard.reflectance,
+            material.pbr.specular_factor.value_vec4.x as f32 * 0.5
+        );
+        let specular = material.pbr.specular_color.value_vec4;
+        assert_eq!(
+            standard.specular_tint,
+            Color::linear_rgb(specular.x as f32, specular.y as f32, specular.z as f32)
+        );
+        // The fixture's own SpecularColor is (0,0,0): Phong "no highlights".
+        assert_eq!(standard.specular_tint, Color::linear_rgb(0.0, 0.0, 0.0));
+        assert_eq!(standard.anisotropy_strength, 0.0);
+        assert_eq!(standard.anisotropy_rotation, 0.0);
     }
 
     #[test]

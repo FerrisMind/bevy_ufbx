@@ -149,10 +149,8 @@ impl AssetLoader for FbxLoader {
         // every downstream consumer sees one effective base sampler. The
         // per-load value wins whenever it was explicitly set.
         let mut effective_settings = settings.clone();
-        effective_settings.default_sampler = crate::resolve_default_sampler(
-            &self.default_sampler,
-            &settings.default_sampler,
-        );
+        effective_settings.default_sampler =
+            crate::resolve_default_sampler(&self.default_sampler, &settings.default_sampler);
         let settings = &effective_settings;
 
         let mut bytes = Vec::new();
@@ -174,7 +172,10 @@ impl AssetLoader for FbxLoader {
                     ..Default::default()
                 },
             )
-            .map_err(|e| FbxError::UfbxError(format!("{e:?}")))?;
+            .map_err(|e| FbxError::UfbxLoad {
+                path: load_context.path().to_string(),
+                message: format!("{e:?}"),
+            })?;
             probe.metadata.exporter
         };
         let is_blender = matches!(
@@ -213,8 +214,10 @@ impl AssetLoader for FbxLoader {
             }
         };
 
-        let root = ufbx::load_memory(&bytes, make_load_opts())
-            .map_err(|e| FbxError::UfbxError(format!("{e:?}")))?;
+        let root = ufbx::load_memory(&bytes, make_load_opts()).map_err(|e| FbxError::UfbxLoad {
+            path: load_context.path().to_string(),
+            message: format!("{e:?}"),
+        })?;
 
         // External texture bytes must be read before any material packing and
         // before the ufbx scene is held across an await (`ufbx::Scene` is not
@@ -232,8 +235,12 @@ impl AssetLoader for FbxLoader {
                 let external_bytes =
                     crate::material::texture::read_external_texture_bytes(&requests, load_context)
                         .await;
-                let root = ufbx::load_memory(&bytes, make_load_opts())
-                    .map_err(|e| FbxError::UfbxError(format!("{e:?}")))?;
+                let root = ufbx::load_memory(&bytes, make_load_opts()).map_err(|e| {
+                    FbxError::UfbxLoad {
+                        path: load_context.path().to_string(),
+                        message: format!("{e:?}"),
+                    }
+                })?;
                 (root, external_bytes)
             }
         };

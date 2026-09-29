@@ -22,6 +22,7 @@ bevy = { version = "0.19", default-features = false, features = [
     "bevy_scene",
     "bevy_world_serialization",
     "png",
+    "jpeg",
 ]}
 ufbx = "0.9"
 thiserror = "2.0"

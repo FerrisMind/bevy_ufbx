@@ -15,9 +15,7 @@ use std::f32::consts::PI;
 use std::path::Path;
 
 use bevy::{
-    light::CascadeShadowConfigBuilder,
-    prelude::*,
-    render::render_resource::Face,
+    light::CascadeShadowConfigBuilder, prelude::*, render::render_resource::Face,
     world_serialization::WorldInstanceReady,
 };
 use bevy_ufbx::{FbxAssetLabel, FbxPlugin};

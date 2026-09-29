@@ -6,6 +6,8 @@
 //!
 //! Spawns multiple `WorldAssetRoot`s: morph, TRS anim, NURBS, skin, multimaterial.
 //! Look for: five labeled demos in one window (coverage checklist).
+//! Animated slots start playback in a `WorldInstanceReady` observer — the
+//! example drives `AnimationPlayer` itself; the loader never auto-plays.
 
 use std::f32::consts::PI;
 
@@ -136,12 +138,12 @@ fn setup(
         Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)).with_scale(Vec3::splat(CM_SCALE)),
     ));
 
-    let (skin_path, skin_scale, skin_anim) =
-        if std::path::Path::new("assets").join(SKIN).is_file() {
-            (SKIN, 0.85, 2usize)
-        } else {
-            (SKIN_FALLBACK, CM_SCALE, 0usize)
-        };
+    let (skin_path, skin_scale, skin_anim) = if std::path::Path::new("assets").join(SKIN).is_file()
+    {
+        (SKIN, 0.85, 2usize)
+    } else {
+        (SKIN_FALLBACK, CM_SCALE, 0usize)
+    };
     spawn_animated(
         &mut commands,
         &asset_server,
@@ -170,7 +172,8 @@ fn setup(
         Text::new(
             "showcase_fbx — visual coverage checklist\n\
              LEFT→RIGHT: morph | anim TRS | nurbs | skin | multi-mat\n\
-             Each slot is its own WorldAssetRoot (Scene0). AnimationGraph only (no auto-play).",
+             Each slot is its own WorldAssetRoot (Scene0). Animations auto-start via a\n\
+             WorldInstanceReady observer (this example — the loader never auto-plays).",
         ),
         TextFont::from_font_size(18.0),
         TextColor(Color::srgb(0.95, 0.95, 0.9)),

@@ -6,9 +6,10 @@
 //!
 //! Asset: `assets/blend_shape_cube.fbx` (Maya cm fixture from ufbx testdata).
 //!
-//! With default [`bevy_ufbx::FbxSpaceConversion::ModifyGeometry`], the mesh is
-//! correctly ~**1 cm** in metres and node scale is identity. This example applies
-//! a visual root scale so the centimetre fixture is readable in a metre-ish scene.
+//! With the default [`bevy_ufbx::FbxSpaceConversion::Auto`] (this Maya fixture
+//! resolves to `ModifyGeometry`), the mesh is correctly ~**1 cm** in metres and
+//! node scale is identity. This example applies a visual root scale so the
+//! centimetre fixture is readable in a metre-ish scene.
 
 use std::f32::consts::PI;
 

@@ -8,12 +8,15 @@
 //! ```
 //!
 //! The loaded model spins slowly so you can inspect it from all sides.
-//! Use `FbxLoaderSettings` to control what gets imported – see the
-//! `load_with_settings` section at the bottom of `setup`.
+//! Set `FBX_SETTINGS=1` to run the same load through
+//! `AssetServer::load_builder().with_settings(...)` with `FbxLoaderSettings`
+//! (see the `use_settings` branch in `setup`). Sampler-tier settings
+//! (`default_sampler` / `override_sampler`) are demonstrated in
+//! `examples/sampler_settings_fbx.rs`.
 
 use bevy::prelude::*;
-use bevy::world_serialization::WorldAssetRoot;
-use bevy_ufbx::FbxPlugin;
+use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
+use bevy_ufbx::{FbxLoaderSettings, FbxPlugin};
 
 fn main() {
     App::new()
@@ -64,21 +67,34 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
         .nth(1)
         .unwrap_or_else(|| "cube.fbx".to_string());
 
-    // --- Default loading ---
-    let scene = asset_server.load(format!("{path}#Scene0"));
+    // --- Load Scene0: default settings, or FbxLoaderSettings when FBX_SETTINGS=1 ---
+    // Current API: `load_builder().with_settings(...)` (the old
+    // `load_with_settings` is deprecated). Sampler-tier settings live in
+    // `examples/sampler_settings_fbx.rs`; this branch shows import-shape knobs.
+    let use_settings = std::env::var_os("FBX_SETTINGS").is_some();
+    let scene = if use_settings {
+        asset_server
+            .load_builder()
+            .with_settings(|settings: &mut FbxLoaderSettings| {
+                // Full knob list on `FbxLoaderSettings`: load_meshes /
+                // load_materials / load_animations / bake_fps /
+                // generate_rest_animation / include_source / convert_coordinates /
+                // space_conversion / skinned_mesh_bounds_policy / default_sampler /
+                // override_sampler …
+                settings.load_cameras = false;
+                settings.load_lights = false;
+            })
+            .load::<WorldAsset>(format!("{path}#Scene0"))
+    } else {
+        asset_server.load(format!("{path}#Scene0"))
+    };
     commands.spawn((WorldAssetRoot(scene), Spinning));
 
-    // --- Custom settings (uncomment to use instead) ---
-    // let fbx = asset_server.load_with_settings::<Fbx, FbxLoaderSettings>(
-    //     path.clone(),
-    //     |s| {
-    //         s.load_cameras = false;
-    //         s.load_lights = false;
-    //     },
-    // );
-    // commands.insert_resource(FbxHandle(fbx));
-
-    info!("Loading '{path}' …");
+    if use_settings {
+        info!("Loading '{path}' with FbxLoaderSettings (load_cameras=false, load_lights=false) …");
+    } else {
+        info!("Loading '{path}' … (FBX_SETTINGS=1 to demo FbxLoaderSettings)");
+    }
 }
 
 // ── Systems ──────────────────────────────────────────────────────────────────

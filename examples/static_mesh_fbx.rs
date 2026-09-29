@@ -4,7 +4,8 @@
 //! cargo run --example static_mesh_fbx
 //! ```
 //!
-//! Prefers Blender Suzanne (`AdjustTransforms`); falls back to `cube.fbx`.
+//! Prefers Blender Suzanne (`AdjustTransforms`); falls back to `cube.fbx`, then
+//! `maya_cube_7400_binary.fbx` (cm fixtures get a 100x demo scale).
 //! Look for: recognizable mesh spinning with materials, sensible metre framing.
 
 use std::f32::consts::PI;

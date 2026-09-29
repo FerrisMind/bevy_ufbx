@@ -118,7 +118,8 @@ fn setup_camera_and_environment(
     let cam_dist = if scale > 10.0 { 4.0 } else { 3.5 };
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(cam_dist, cam_dist * 0.8, cam_dist * 1.4).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_xyz(cam_dist, cam_dist * 0.8, cam_dist * 1.4)
+            .looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
     commands.spawn((

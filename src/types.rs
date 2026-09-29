@@ -171,7 +171,11 @@ impl FbxPrimitive {
     /// Empty FBX names count as unnamed: an empty `mesh_name` falls back to
     /// `"Mesh"` and an empty material name to no material.
     pub fn name_for(mesh_name: &str, material_name: Option<&str>) -> String {
-        let mesh_name = if mesh_name.is_empty() { "Mesh" } else { mesh_name };
+        let mesh_name = if mesh_name.is_empty() {
+            "Mesh"
+        } else {
+            mesh_name
+        };
         match material_name.filter(|name| !name.is_empty()) {
             Some(material_name) => format!("{mesh_name}.{material_name}"),
             None => mesh_name.to_string(),

@@ -3,15 +3,17 @@
 use crate::error::FbxError;
 use crate::label::FbxAssetLabel;
 use crate::loader::{FbxLoaderSettings, FbxSkinnedMeshBoundsPolicy};
+use crate::mesh::group_faces_by_material;
 #[cfg(feature = "animation")]
 use crate::names::{animation_name_path, animation_root_typed_ids, is_ancestor_of};
 use crate::names::{node_name_component, node_typed_id};
 use crate::types::{
-    FbxExtras, FbxMaterialExtras, FbxMaterialName, FbxMeshExtras, FbxMeshName, FbxSceneExtras,
-    FbxSceneName, FbxSkin, NodeMeshPrimitive,
+    FbxExtras, FbxMaterialExtras, FbxMaterialName, FbxMeshExtras, FbxMeshName, FbxPrimitive,
+    FbxSceneExtras, FbxSceneName, FbxSkin, NodeMeshPrimitive,
 };
 use crate::utils::{convert_matrix, convert_transform, props_to_extras};
 use bevy::asset::{Handle, LoadContext};
+use bevy::camera::primitives::Aabb;
 use bevy::camera::visibility::{DynamicSkinnedMeshBounds, NoFrustumCulling};
 use bevy::mesh::morph::{MeshMorphWeights, MorphWeights};
 use bevy::mesh::skinning::SkinnedMesh;
@@ -48,20 +50,27 @@ pub fn build_scene(
     };
     let scene_extras = props_to_extras(&scene.metadata.scene_props)
         .or_else(|| props_to_extras(&scene.root_node.element.props));
-    // Marker entity carrying scene identity (mirrors glTF scene name/extras).
-    {
-        let mut scene_marker = world.spawn((
+    // Visible scene root (glTF parity, BG `loader/mod.rs:1029-1079`): a single
+    // entity carries `Name` (the scene name), `FbxSceneName`, `FbxSceneExtras`
+    // and `Visibility::default()`, and parents the whole hierarchy. It replaces
+    // the old separate `Visibility::Hidden` marker entity — a user looking up
+    // `FbxSceneName` now finds the actual visible root (plan C2, deliberate
+    // behavior change; the component type names are preserved).
+    let scene_root_entity = {
+        let mut scene_root = world.spawn((
             Transform::default(),
             GlobalTransform::default(),
-            Visibility::Hidden,
-            FbxSceneName(scene_name),
+            Visibility::default(),
+            Name::new(scene_name.clone()),
+            FbxSceneName(scene_name.clone()),
         ));
-        if let Some(extras) = scene_extras {
-            scene_marker.insert(FbxSceneExtras {
-                value: extras.value,
-            });
-        }
-    }
+        // Always present: `value` is empty when the file authors no scene
+        // extras, so `FbxSceneExtras` is a reliable query on the root.
+        scene_root.insert(FbxSceneExtras {
+            value: scene_extras.map(|extras| extras.value).unwrap_or_default(),
+        });
+        scene_root.id()
+    };
 
     let default_material = materials.first().cloned().unwrap_or_else(|| {
         load_context.add_labeled_asset(
@@ -87,27 +96,28 @@ pub fn build_scene(
     // `LoadOpts::root_transform`) stores the whole unit/axis conversion in
     // `scene.root_node->local_transform` and nowhere else (ufbx
     // `ufbxi_setup_root_node` + `ufbx_space_conversion`), so skipping it silently
-    // drops the requested conversion. Spawn it as a wrapper entity: real nodes keep
-    // their local TRS untouched, and baked animation curves address real nodes only
-    // (path policy A in `names.rs` never includes the synthetic root), so animation
-    // can never overwrite the conversion. When the conversion is identity — the
-    // `Auto` / `ModifyGeometry` / `AdjustTransforms` common path — no wrapper is
-    // spawned and the hierarchy is exactly as before.
+    // drops the requested conversion. Spawn it as a wrapper entity under the
+    // visible scene root: real nodes keep their local TRS untouched, and baked
+    // animation curves address real nodes only (path policy A in `names.rs` never
+    // includes the synthetic root), so animation can never overwrite the
+    // conversion. When the conversion is identity — the `Auto` / `ModifyGeometry` /
+    // `AdjustTransforms` common path — no wrapper is spawned: parentless nodes
+    // hang directly under the scene root instead.
     let synthetic_root_entity: Option<Entity> = {
         let transform = convert_transform(&scene.root_node.local_transform);
         if transform == Transform::IDENTITY {
             None
         } else {
-            Some(
-                world
-                    .spawn((
-                        transform,
-                        GlobalTransform::default(),
-                        Visibility::Inherited,
-                        Name::new("FbxSceneRoot"),
-                    ))
-                    .id(),
-            )
+            let wrapper = world
+                .spawn((
+                    transform,
+                    GlobalTransform::default(),
+                    Visibility::Inherited,
+                    Name::new("FbxSceneRoot"),
+                ))
+                .id();
+            world.entity_mut(scene_root_entity).add_child(wrapper);
+            Some(wrapper)
         }
     };
 
@@ -144,12 +154,13 @@ pub fn build_scene(
             continue;
         };
         // Children of the synthetic ufbx root — and any parentless outlier nodes —
-        // hang under the wrapper so the space conversion reaches them.
+        // hang under the wrapper so the space conversion reaches them (or directly
+        // under the scene root when there is no wrapper).
         let parent = match u_node.parent.as_ref() {
             Some(parent_ref) if !parent_ref.is_root => {
                 typed_id_to_entity.get(&node_typed_id(parent_ref)).copied()
             }
-            _ => synthetic_root_entity,
+            _ => synthetic_root_entity.or(Some(scene_root_entity)),
         };
         if let Some(parent) = parent {
             world.entity_mut(parent).add_child(child);
@@ -198,6 +209,11 @@ pub fn build_scene(
     #[cfg(not(feature = "animation"))]
     let _ = has_animations;
 
+    // Mesh-space vertex bounds per ufbx mesh element (computed once per mesh,
+    // shared instances hit the cache), in the same material-group order
+    // `process_meshes` splits primitives in. See `mesh_primitive_bounds`.
+    let mut bounds_by_mesh_element: HashMap<u32, Vec<Option<(Vec3, Vec3)>>> = HashMap::new();
+
     for u_node in scene.nodes.as_ref().iter() {
         if u_node.is_root {
             continue;
@@ -216,6 +232,21 @@ pub fn build_scene(
             let world = Transform::from_matrix(convert_matrix(&u_node.node_to_world));
             world.scale.is_negative_bitmask().count_ones() & 1 == 1
         };
+
+        // Explicit `Aabb` (glTF parity, BG `loader/mod.rs:1694-1705`): mesh-space
+        // bounds from the same corner positions `create_mesh_from_corners` writes
+        // into the primitive's mesh asset. NURBS primitives are tessellated only
+        // inside `mesh.rs` (the node has no `ufbx::Mesh`), so they keep Bevy's
+        // runtime auto-calculation.
+        let primitive_bounds: Option<Vec<Option<(Vec3, Vec3)>>> =
+            u_node.mesh.as_ref().and_then(|mesh_ref| {
+                let mesh = mesh_ref.as_ref();
+                let element_id = mesh.element.element_id;
+                if !bounds_by_mesh_element.contains_key(&element_id) {
+                    bounds_by_mesh_element.insert(element_id, mesh_primitive_bounds(mesh));
+                }
+                bounds_by_mesh_element.get(&element_id).cloned()
+            });
 
         let mut max_morph = 0usize;
         let mut morph_weights: Vec<f32> = Vec::new();
@@ -282,11 +313,30 @@ pub fn build_scene(
             if !primitive.material_name.is_empty() {
                 mesh_entity.insert(FbxMaterialName(primitive.material_name.clone()));
             }
+            // glTF parity (BG `gltf_ext/mesh.rs::primitive_name` +
+            // `loader/mod.rs:1733`): the `"{mesh}.{material}"` name backs the
+            // primitive entity's `Name`, unconditionally.
+            mesh_entity.insert(Name::new(FbxPrimitive::name_for(
+                &u_node.element.name,
+                (!primitive.material_name.is_empty()).then_some(primitive.material_name.as_str()),
+            )));
             // Material extras from the matching material element, not the node.
             if let Some(extras) = material_extras_for_primitive(scene, primitive) {
                 mesh_entity.insert(FbxMaterialExtras {
                     value: extras.value,
                 });
+            }
+
+            // Explicit bounds, mirroring `Aabb::from_min_max` insertion in BG
+            // (`loader/mod.rs:1705`). The skinned-bounds policy markers above are
+            // unaffected: `DynamicSkinnedMeshBounds` keeps updating this `Aabb`
+            // from per-joint bounds, `NoFrustumCulling` still disables culling.
+            if let Some(bounds) = primitive_bounds
+                .as_ref()
+                .and_then(|bounds| bounds.get(primitive.primitive_index))
+                .and_then(|bounds| *bounds)
+            {
+                mesh_entity.insert(Aabb::from_min_max(bounds.0, bounds.1));
             }
 
             if primitive.morph_target_count > 0 {
@@ -467,6 +517,55 @@ fn material_extras_for_primitive(
         }
     }
     None
+}
+
+/// Per-material-group vertex bounds in **mesh space** for one ufbx mesh.
+///
+/// Returns one entry per primitive in the exact order `process_meshes` splits
+/// them (material groups sorted by material index — the order of
+/// [`group_faces_by_material`] after `sort_by_key`), so callers index it with
+/// `NodeMeshPrimitive::primitive_index`. Each entry is the min/max over the
+/// same corner positions [`crate::mesh::create_mesh_from_corners`] writes into
+/// that primitive's `Mesh` (`vertex_position[corner]`), i.e. the `Aabb`
+/// `bevy_gltf` derives from the glTF primitive accessor bounds.
+///
+/// `None` means bounds are unavailable (no usable position data, or no finite
+/// positions in the group); callers fall back to Bevy's runtime calculation.
+fn mesh_primitive_bounds(mesh: &ufbx::Mesh) -> Vec<Option<(Vec3, Vec3)>> {
+    let mut groups: Vec<(usize, Vec<u32>)> = group_faces_by_material(mesh).into_iter().collect();
+    groups.sort_by_key(|(material_idx, _)| *material_idx);
+
+    let indices = mesh.vertex_position.indices.as_ref();
+    let values = mesh.vertex_position.values.as_ref();
+    let usable = mesh.vertex_position.exists && !indices.is_empty() && !values.is_empty();
+
+    groups
+        .into_iter()
+        .map(|(_, corners)| {
+            if !usable {
+                return None;
+            }
+            let mut min = Vec3::splat(f32::INFINITY);
+            let mut max = Vec3::splat(f32::NEG_INFINITY);
+            let mut found = false;
+            for &corner in corners.iter() {
+                let Some(&value_idx) = indices.get(corner as usize) else {
+                    continue;
+                };
+                let Some(position) = values.get(value_idx as usize) else {
+                    continue;
+                };
+                let point = Vec3::new(position.x as f32, position.y as f32, position.z as f32);
+                if !point.is_finite() {
+                    continue;
+                }
+                min = min.min(point);
+                max = max.max(point);
+                found = true;
+            }
+            found.then_some((min, max))
+        })
+        .collect()
 }
 
 /// FBX cone-angle range in degrees (Autodesk FBX SDK `KFbxLight`).

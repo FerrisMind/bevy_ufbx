@@ -5,6 +5,19 @@ use bevy::image::ImageSamplerDescriptor;
 use bevy_ufbx::{FbxLoaderSettings, FbxSkinnedMeshBoundsPolicy, FbxSpaceConversion};
 
 #[test]
+fn partial_settings_preserve_defaults() {
+    let settings: FbxLoaderSettings =
+        serde_json::from_str(r#"{"load_lights":false,"bake_fps":60.0}"#).unwrap();
+    assert!(!settings.load_lights);
+    assert!(settings.load_cameras);
+    assert_eq!(settings.bake_fps, 60.0);
+    assert_eq!(settings.space_conversion, FbxSpaceConversion::Auto);
+    assert!(settings.override_sampler.is_none());
+    let empty: FbxLoaderSettings = serde_json::from_str("{}").unwrap();
+    assert_eq!(empty.bake_fps, 30.0);
+}
+
+#[test]
 fn test_loader_settings_default() {
     let settings = FbxLoaderSettings::default();
 

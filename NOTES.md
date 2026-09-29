@@ -35,7 +35,7 @@ current semantics honestly, including remaining correctness gaps.
 - `FbxNode`: `children` + `skin` handles filled (two-pass label reservation, glTF-style)
 - `FbxMaterial` container asset (glTF-style): `Material{N}` → `FbxMaterial` (`.material` is `StandardMaterial`); inverted twins stay `Material{N} (inverted)` as bare `StandardMaterial`
 - World **neg-scale**: odd count of negative axes on **world** scale (not local `sx*sy*sz`) selects `Material{N} (inverted)` cull twin (skips double-sided)
-- Texture samplers: FBX `wrap_u` / `wrap_v` → address modes; mag/min/mip from `FbxLoaderSettings::default_sampler` (or full replace via `override_sampler`) — ufbx 0.9 has no filter fields
+- Texture samplers: FBX `wrap_u` / `wrap_v` → address modes; mag/min/mip from `FbxLoaderSettings::default_sampler` (or full replace via `override_sampler`) — ufbx 0.9 has no filter fields. Plugin-level default: `DefaultFbxImageSampler` resource; precedence `override_sampler` > per-load `default_sampler` (when explicitly set) > resource
 - Blender PBR: `use_blender_pbr_material` when probe exporter is Blender binary/ascii
 - Anim takes: `Animation{N}` labels + `Fbx.named_animations["Take 001"]` map (no second name label)
 - Dual-published texture color space labels: `Texture{N}` (sRGB) / `Texture{N}/Linear`; packed labels
@@ -44,6 +44,45 @@ current semantics honestly, including remaining correctness gaps.
 - `--no-default-features` lib build: CI job enforces it with `RUSTFLAGS: "-C debuginfo=0 -D warnings"` +
   `cargo check --lib --no-default-features` (plain cargo args — warning enforcement via env, keeping the
   shared `debuginfo=0` flag; node.rs/scene.rs cfg-gating landed by L2/L4)
+
+### glTF-parity pass (2026-09-29, waves L-MAT/L-PLUGIN/L-ANIM/L-TEX/L-SCENE-2/L-MESH-ERR)
+
+- **Specular/anisotropy/clearcoat scalars → `StandardMaterial`**: `pbr.specular_factor` →
+  `reflectance = factor × 0.5` (exact `bevy_gltf` formula), `specular_color` → `specular_tint`,
+  `specular_anisotropy`/`specular_rotation` → `anisotropy_strength`/`anisotropy_rotation`, coat →
+  `clearcoat`/`clearcoat_perceptual_roughness` — all applied only when the ufbx map is authored
+  (`has_value`). Specular magnitude for non-glTF shading models (Phong/Arnold/Max Physical) approximates
+  the glTF scale rather than matching it exactly — flagged, not faked.
+- **Clearcoat textures**: `coat_factor` → `clearcoat_texture`, `coat_roughness` →
+  `clearcoat_roughness_texture`, `coat_normal` → `clearcoat_normal_texture` (all linear), gated on the
+  default-off **`pbr_multi_layer_material_textures`** Cargo feature (forwards `bevy/…`; same gate
+  `bevy`/`bevy_gltf` use — the `StandardMaterial` texture fields only exist when bevy_pbr compiles them
+  in). `coat_glossiness` is deliberately not bound (gloss-inverting sampler doesn't exist; same
+  precedent as the main roughness map).
+- **Plugin-level sampler + compressed formats**: `DefaultFbxImageSampler` resource (same API as
+  `DefaultGltfImageSampler`) with precedence `override_sampler` > per-load `default_sampler` > resource;
+  the loader is registered in `FbxPlugin::build` sharing the resource's `Arc<Mutex<…>>`.
+  `FbxPlugin::finish()` reads the render device's `CompressedImageFormatSupport` into
+  `FbxCompressedImageFormatSupport` + a process-wide cache that texture code consumes (headless runs
+  without a finished plugin see `NONE`); decode failure stays warn + fallback.
+- **Exact cubic animation curves**: cubic-authored TRS channels become `CubicKeyframeCurve` /
+  `CubicRotationCurve` built from per-key derivatives sampled through `ufbx_evaluate_transform`, with a
+  per-segment probe against ufbx at s ∈ {0.2, 0.4, 0.6, 0.8}; any mismatch silently falls back to the
+  baked track (stepped/linear/constant/multi-layer/scale-helper paths unchanged). Morph weights use a
+  private wide Hermite curve inside `WeightsCurve` because bevy_animation 0.19.1's
+  `WideCubicKeyframeCurve` has two confirmed defects (panic on the exact-key branch; swapped end
+  arguments in the between-key helper) — probe tests in `tests/animation_cubic.rs` document the
+  upstream bug and mark the switch-back point.
+- **Scene parity**: first camera in scene order spawns with `Camera { is_active: true }`; light `range`
+  from FBX attenuation-end raw props (`FarAttenuationEnd`/`AttenuationEnd`/`DecayStart`) with fallback
+  20.0 (KHR_lights_punctual default), `SpotLight.radius` mirrors `range`; **scene-root merge** — visible
+  root now carries `Name` + `FbxSceneName` + `FbxSceneExtras` and parents the hierarchy, hidden marker
+  entity removed (**deliberate behavior change**); explicit `Aabb` on mesh entities (NURBS-tessellated
+  nodes keep runtime calc); primitive entities get `Name` `"{mesh}.{material}"`.
+- **Mesh/errors**: `JOINT_INDEX`/`JOINT_WEIGHT` written only when a skin instance references the mesh
+  (`skin_instanced_mesh_elements` predicts exactly which `process_skins` emits for); `FbxPrimitive.name`
+  populated from `FbxPrimitive::name_for`; `FbxError` is `#[non_exhaustive]` with 10 variants incl.
+  structured `UfbxLoad { path, message }` and `MorphTargets { mesh, message }`.
 
 ## Skin inverse bind matrices (canonical `geometry_to_bone`)
 
@@ -66,9 +105,11 @@ decreasing influence, first 4 taken and renormalized — the recipe documented o
 ## Texture semantics (current)
 
 - Slot bindings resolve from ufbx's resolved `MaterialMap.texture` (`pbr.base_color`, `pbr.opacity`,
-  `pbr.emission_color`, `pbr.normal_map`, `pbr.metalness`, `pbr.roughness`, `pbr.ambient_occlusion`), with the
+  `pbr.emission_color`, `pbr.normal_map`, `pbr.metalness`, `pbr.roughness`, `pbr.ambient_occlusion`, plus
+  `pbr.coat_factor` / `pbr.coat_roughness` / `pbr.coat_normal` → clearcoat slots behind the default-off
+  `pbr_multi_layer_material_textures` feature), with the
   FBX property-name match as fallback. Color slots (base color, emissive, opacity) decode sRGB; data slots
-  (normal, metallic, roughness, AO, height) decode linear — `bevy_gltf` parity. A map feeding both kinds of
+  (normal, metallic, roughness, AO, height, all three coat maps) decode linear — `bevy_gltf` parity. A map feeding both kinds of
   slots is dual-published: `Texture{N}` (sRGB) and `Texture{N}/Linear`.
 - Embedded **and pre-read external** images are packed at load time: an opacity **luminance mask** is written
   into the base-color alpha (`Material{i}/BaseColorOpacity`, so `AlphaMode::Mask` works without graying the
@@ -87,7 +128,11 @@ decreasing influence, first 4 taken and renormalized — the recipe documented o
 - Per-map UV channel (`*_channel: UvChannel`) is selected from the texture's `uv_set`. Bevy 0.19 supports
   **one** `uv_transform` per `StandardMaterial`, so per-map transforms collapse to the base-color transform.
 - Compressed embedded containers (DDS/KTX2) additionally need the matching Bevy image features enabled
-  (the default feature set ships PNG and JPEG decoders).
+  (the default feature set ships PNG and JPEG decoders). Decoder selection consults the render device's
+  `CompressedImageFormatSupport` (recorded by `FbxPlugin::finish` into `FbxCompressedImageFormatSupport`
+  + a process-wide cache; headless runs without a finished plugin see `NONE`); a decode failure warns and
+  falls back to a plain external reference — never a load error (deliberate superset over `bevy_gltf`,
+  which fails the load).
 - Packing skips when the maps to combine have mismatched UV wrap modes (one sampler cannot satisfy both).
   The opacity luminance mask is packed from **raw** luminance bytes — authored values are preserved, no
   color management applied at pack time (the mask slot itself decodes sRGB when displayed standalone).
@@ -103,6 +148,31 @@ decreasing influence, first 4 taken and renormalized — the recipe documented o
 | Native NURBS | Tessellate only |
 | Stereo / character / audio | Ignored |
 
+## Engine-locked (cannot be fixed without modifying Bevy or ufbx)
+
+Scope rule: only changes implementable **without engine modifications**. These limits belong to Bevy
+0.19 / `bevy_gltf` / ufbx 0.9 themselves — `bevy_gltf` hits the same wall, so none is a parity gap:
+
+- One `uv_transform` per `StandardMaterial` (per-map transforms collapse to base color; per-map
+  `*_channel` works).
+- No normal-map scale, no occlusion strength — `StandardMaterial` has no such fields; `bevy_gltf`
+  leaves both TODO.
+- `MAX_JOINTS = 256`, `JOINT_INDEX` as `Uint16x4`, 4 weights per vertex, LBS only (no
+  dual-quaternion in `bevy_render`).
+- `MAX_MORPH_WEIGHTS` (this crate trims with a warning; `bevy_gltf` fails the load).
+- UV0/UV1 only (`MeshUVs` limit).
+- One normal map per material domain (`normal_map_texture`); the clearcoat layer's dedicated
+  `clearcoat_normal_texture` exists behind the default-off `pbr_multi_layer_material_textures` feature.
+- ufbx 0.9 typed API exposes no mag/min/mip filter fields on textures — only wrap modes; filters come
+  from `default_sampler`/`override_sampler`.
+- `ufbx::Scene` is not `Send` → no parsed document in the asset; `Fbx.source` holds raw bytes +
+  `FbxMeta` (`bevy_gltf` can store `gltf::Gltf`, we cannot store `ufbx::Scene`).
+- Constraints/IK, stereo, audio — outside Bevy's runtime model (warn/skip or bake in DCC).
+- 2 corpus fixtures abort the native ufbx parser — isolated and expected; only a ufbx upgrade fixes them.
+- KHR extensions Bevy's glTF path ignores too: sheen, iridescence, dispersion, variants, meshopt,
+  draco, `EXT_mesh_gpu_instancing` (basisu/webp only as raw formats, not extension syntax). Not
+  adopting them creates no gap versus `bevy_gltf`.
+
 ## Known limitations (current)
 
 - **Untrusted input**: ufbx is a native parser; malformed FBX data can abort the host process. The loader is
@@ -114,19 +184,32 @@ decreasing influence, first 4 taken and renormalized — the recipe documented o
   textures (see Texture semantics for the external-read caveats).
 - **Duplicate node/mesh names** overwrite each other in `named_*` maps and can collide `AnimationTargetId`
   paths (bevy_gltf has the identical limitation).
-- **Light conversion** uses fixed intensity multipliers (directional ×10000, point/spot ×1000) — heuristics,
-  not physical units; area lights become point lights. Spot cones are converted correctly (FBX full-aperture
-  degrees → Bevy half-angle radians; missing → 45°, clamped to 160°).
+- **Light conversion** is a documented heuristic, **not** a physical unit conversion: FBX `Intensity` is a
+  DCC-relative factor and is **not** lux or candela (unlike `bevy_gltf`, which passes KHR_lights_punctual
+  lux/candela through). Fixed multipliers (directional ×10000, point/spot ×1000) only preserve existing
+  visuals; area lights become point lights. `range` **is** set from the FBX attenuation-end raw property
+  (`FarAttenuationEnd`/`Far Attenuation End`/`AttenuationEnd`/`DecayStart` on `ufbx_light.props`),
+  fallback 20.0 (KHR_lights_punctual default); `SpotLight.radius` mirrors `range`. Spot cones are
+  converted correctly (FBX full-aperture degrees → Bevy half-angle radians; missing → 45°, clamped to 160°).
 - **Emission color** is treated as linear.
-- **GPU instancing**: dedicated FBX instance metadata is not imported — **missing loader work, not an engine
-  limitation**. Bevy already auto-batches and shares mesh assets; shared ufbx mesh `element_id`s reuse one
-  `FbxMesh` today.
-- **Verification**: full corpus sweep verified against `target/l5-corpus/final-sweep.log` — **714 files:
-  702 loaded, 10 expected, 2 hostile (isolated subprocesses; ufbx native terminations 0xC0000409 and
-  0xC0000005), 0 unexpected, 0 timeouts, 0 panics** (wall 11.0 s). ID-collision empty-stack loader bug
-  fixed; collision case 637 ms. Fresh full `cargo test` exit 0: **140 passed / 0 failed** (26 lib +
-  114 integration, incl. 3 corpus tests; doc-tests 0). Examples check exit 0; feature-off lib check
-  (incl. JPEG) and feature-off rustdoc exit 0 clean.
+- **GPU instancing**: `EXT_mesh_gpu_instancing` metadata is not imported — and **`bevy_gltf` does not
+  support that extension either** (Bevy's glTF extension table marks it ❌), so this is parity, not
+  missing loader work. Parity lives at the scene level: N entities sharing `Handle<Mesh>` /
+  `Handle<StandardMaterial>` (shared ufbx mesh `element_id`s already reuse one `FbxMesh`); batching is
+  the engine's job.
+- **Scene root (behavior change, 2026-09-29)**: `FbxSceneName` / `FbxSceneExtras` / `Name` moved onto the
+  visible scene root that parents the hierarchy; the previous hidden marker entity was removed. Code
+  querying the hidden marker must target the visible root. `FbxSceneExtras` is now always present on the
+  root (empty string when the file authors none).
+- **Verification** (wave-3 leaf, post-parity, `wave3-verify.md`): full suite `cargo test -- --test-threads=1`
+  → **163 passed / 0 failed**; with `pbr_multi_layer_material_textures` → **165 / 0** (lib 46,
+  `texture_slots` 6). Corpus sweep (L5 procedure) — **714 files: 702 loaded, 10 expected, 2 hostile
+  (isolated subprocesses; ufbx native terminations 0xC0000409 and 0xC0000005), 0 unexpected,
+  0 timeouts, 0 panics** — zero delta vs the pre-parity sweep. Per-suite: lib 45, `parity_contract` 16,
+  `mesh_error_contract` 6, `animation_cubic` 7, `texture_slots` 5 (6 with the feature), `skin_loading` 9,
+  `lambert_opacity` 2. `cargo check --examples`, strict `-D warnings` lib checks (default and
+  `--no-default-features`) and rustdoc in both modes all clean. ID-collision empty-stack
+  loader bug fixed; collision case 637 ms.
 
 ## LoadOpts (when `convert_coordinates`)
 
@@ -153,7 +236,7 @@ Local `assets/` (visual examples + tests):
 | `blender_282_suzanne_7400_binary.fbx` | Blender AdjustTransforms static mesh |
 | `blender_279_nested_meshes_7400_binary.fbx` | nested mesh hierarchy (`nested_meshes_fbx`) |
 | `blender_suzanne_multimaterial_7400_binary.fbx` | material-split primitives / color regions (`multimaterial_fbx`, `showcase_fbx`) |
-| `maya_camera_light_axes_y_up_6100_binary.fbx` | lights + inactive camera (no mesh; `lights_cameras_fbx`) |
+| `maya_camera_light_axes_y_up_6100_binary.fbx` | lights + camera activation — first camera in scene order spawns `is_active: true` (no mesh; `lights_cameras_fbx`) |
 | `zbrush_vertex_color_7500_ascii.fbx` | vertex colors / `ATTRIBUTE_COLOR` (`vertex_color_fbx`) |
 | `blender_340_mirrored_normals_7400_binary.fbx` | neg world scale → inverted cull (`neg_scale_fbx`) |
 | `blender340_tangent_sign_7400_binary.fbx` | tangent `w` signs (21 020 bytes, md5 `e8898c0049dbd17c8b621a9d31add642`, verbatim copy of `libs/ufbx/data/…`) |

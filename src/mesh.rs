@@ -2,7 +2,7 @@
 
 use crate::error::FbxError;
 use crate::label::FbxAssetLabel;
-use crate::loader::FbxLoaderSettings;
+use crate::loader::{FbxLoaderSettings, FbxSkinnedMeshBoundsPolicy};
 use crate::types::{FbxMesh, FbxPrimitive, NodeMeshPrimitive};
 use crate::utils::{convert_matrix, props_to_extras};
 use bevy::asset::{Handle, LoadContext};
@@ -12,8 +12,217 @@ use bevy::pbr::StandardMaterial;
 use bevy::prelude::*;
 use std::collections::HashMap;
 
-/// Bevy LBS joint limit (must match [`SkinnedMesh`] / skin IBM truncation).
+/// Bevy LBS joint limit (must match [`bevy::mesh::skinning::SkinnedMesh`]).
+///
+/// Joint slots are assigned in cluster order after invalid clusters are dropped,
+/// so this caps *valid* clusters, exactly like the IBM/joint vectors in
+/// [`crate::node::process_skins`].
 pub const MAX_JOINTS: usize = 256;
+
+/// Influences per vertex in Bevy's `Uint16x4` / `f32x4` joint attributes.
+pub const MAX_WEIGHTS_PER_VERTEX: usize = 4;
+
+/// Minimum |cos| between `cross(normal, tangent)` and the bitangent for the
+/// tangent handedness sign to be trusted. Measured on the ufbx corpus: valid
+/// frames land at |cos| >= 0.999, degenerate ones at |cos| <= 1e-6.
+const TANGENT_SIGN_MIN_COS: f32 = 1e-6;
+
+/// Tangent handedness sign for Bevy's tangent `w` component.
+///
+/// Bevy's PBR shader reconstructs the bitangent as `w * cross(N, T)`
+/// (`bevy_pbr` `render/pbr_functions.wgsl`, `calculate_tbn_mikktspace`), the
+/// same convention as glTF/mikktspace. FBX stores the bitangent explicitly
+/// (`Mesh::vertex_bitangent`), so
+///
+/// ```text
+/// w = sign(dot(cross(normal, tangent), bitangent))
+/// ```
+///
+/// Returns `1.0` (the old hardcoded value) when the bitangent is absent, any
+/// input is non-finite/zero-length, or the frame is degenerate enough that the
+/// sign carries no information.
+pub fn tangent_sign(normal: Vec3, tangent: Vec3, bitangent: Vec3) -> f32 {
+    let cross = normal.cross(tangent);
+    let denom = cross.length() * bitangent.length();
+    let dot = cross.dot(bitangent);
+    if !dot.is_finite() || !(denom > 0.0) || !denom.is_finite() {
+        return 1.0;
+    }
+    let cos = dot / denom;
+    if !cos.is_finite() || cos.abs() < TANGENT_SIGN_MIN_COS {
+        return 1.0;
+    }
+    if cos > 0.0 { 1.0 } else { -1.0 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn matrix_is_finite_rejects_non_finite_components() {
+        let good = ufbx::Matrix::identity();
+        assert!(matrix_is_finite(&good));
+
+        for field in 0..12 {
+            let mut bad = ufbx::Matrix::identity();
+            // ufbx `Real` is f64.
+            match field {
+                0 => bad.m00 = f64::NAN,
+                1 => bad.m01 = f64::INFINITY,
+                2 => bad.m02 = f64::NEG_INFINITY,
+                3 => bad.m03 = f64::NAN,
+                4 => bad.m10 = f64::NAN,
+                5 => bad.m11 = f64::NAN,
+                6 => bad.m12 = f64::NAN,
+                7 => bad.m13 = f64::NAN,
+                8 => bad.m20 = f64::NAN,
+                9 => bad.m21 = f64::NAN,
+                10 => bad.m22 = f64::NAN,
+                _ => bad.m23 = f64::NAN,
+            }
+            assert!(!matrix_is_finite(&bad), "field {field} not detected");
+        }
+
+        // f64 magnitude that overflows when converted to the Bevy f32 matrix.
+        let mut overflow = ufbx::Matrix::identity();
+        overflow.m00 = 1.0e300;
+        assert!(!matrix_is_finite(&overflow));
+    }
+}
+
+/// True when `m` has no non-finite component.
+fn matrix_is_finite(m: &ufbx::Matrix) -> bool {
+    [
+        m.m00, m.m01, m.m02, m.m03, m.m10, m.m11, m.m12, m.m13, m.m20, m.m21, m.m22, m.m23,
+    ]
+    .iter()
+    .all(|v| (*v as f32).is_finite())
+}
+
+/// Can this ufbx skin cluster be used as a Bevy joint?
+///
+/// Requires a bone node (ufbx only leaves this `None` with
+/// `connect_broken_elements`) and a finite inverse bind matrix
+/// (`geometry_to_bone`). Clusters failing this are dropped with a warning
+/// instead of failing the whole file.
+pub fn cluster_is_valid(cluster: &ufbx::SkinCluster) -> bool {
+    cluster.bone_node.is_some() && matrix_is_finite(&cluster.geometry_to_bone)
+}
+
+/// Map original ufbx cluster index → Bevy joint slot (`None` = dropped).
+///
+/// This is the single source of truth shared by [`crate::node::process_skins`]
+/// (IBM + joint order) and [`process_skinning_data`] (`JOINT_INDEX` values):
+/// both call it with the same predicate and cap, so influence indices can never
+/// point at a different joint than the IBM row they are meant to use.
+///
+/// Valid clusters are compacted in original order and the first `max_joints`
+/// survive; later ones (and invalid ones) map to `None`.
+pub fn compact_cluster_slots(
+    num_clusters: usize,
+    is_valid: impl Fn(usize) -> bool,
+    max_joints: usize,
+) -> Vec<Option<u16>> {
+    let mut slots = vec![None; num_clusters];
+    let mut next_slot = 0usize;
+    for (cluster_index, slot) in slots.iter_mut().enumerate() {
+        if next_slot >= max_joints {
+            break;
+        }
+        if is_valid(cluster_index) {
+            *slot = Some(next_slot as u16);
+            next_slot += 1;
+        }
+    }
+    slots
+}
+
+/// Top influences for one mesh vertex from the flattened ufbx influence table.
+///
+/// `weights` is `SkinDeformer::weights[weight_begin..weight_begin + num_weights]`
+/// (already sorted by decreasing influence; see `docs/ufbx-deformers.html`,
+/// "Resolving which bones affect a given vertex"). Non-finite and non-positive
+/// weights are dropped, the first [`MAX_WEIGHTS_PER_VERTEX`] survivors are kept
+/// and renormalized, and cluster indices are remapped through `cluster_slots`
+/// (so dropped/over-cap clusters lose their influences).
+///
+/// An all-zero weight row means the vertex had no usable influence at all; callers
+/// must resolve that with [`bind_unweighted_vertex`] rather than leaving the row as is.
+/// Bevy's `skin_model` (`bevy_pbr` `render/skinning.wgsl`) is a weighted sum of joint
+/// matrices, so zero weights give the zero matrix and collapse the vertex to the world
+/// origin.
+pub fn top4_influences(
+    weights: &[ufbx::SkinWeight],
+    cluster_slots: &[Option<u16>],
+) -> ([u16; MAX_WEIGHTS_PER_VERTEX], [f32; MAX_WEIGHTS_PER_VERTEX]) {
+    let mut indices = [0u16; MAX_WEIGHTS_PER_VERTEX];
+    let mut out_weights = [0.0f32; MAX_WEIGHTS_PER_VERTEX];
+    let mut count = 0usize;
+    let mut total = 0.0f32;
+
+    for influence in weights {
+        if count == MAX_WEIGHTS_PER_VERTEX {
+            break;
+        }
+        let weight = influence.weight as f32;
+        if !weight.is_finite() || weight <= 0.0 {
+            continue;
+        }
+        let Some(slot) = cluster_slots
+            .get(influence.cluster_index as usize)
+            .copied()
+            .flatten()
+        else {
+            continue;
+        };
+        indices[count] = slot;
+        out_weights[count] = weight;
+        total += weight;
+        count += 1;
+    }
+
+    if total > 0.0 {
+        for weight in out_weights.iter_mut().take(count) {
+            *weight /= total;
+        }
+    } else {
+        indices = [0u16; MAX_WEIGHTS_PER_VERTEX];
+        out_weights = [0.0f32; MAX_WEIGHTS_PER_VERTEX];
+    }
+
+    (indices, out_weights)
+}
+
+/// Bind a vertex that ended up with no usable influence to the first valid joint.
+///
+/// [`top4_influences`] returns an all-zero weight row when every influence was dropped
+/// (non-finite/non-positive weight, or a cluster that is invalid or over the joint cap).
+/// Left as is, that row makes Bevy's `skin_model` (`bevy_pbr` `render/skinning.wgsl`) — a
+/// weighted sum of joint matrices — produce the zero matrix, collapsing the vertex to the
+/// world origin. With `has_valid_joint` (the caller's
+/// `cluster_slots.iter().any(Option::is_some)`) the vertex is bound rigidly to slot 0
+/// instead; [`compact_cluster_slots`] assigns dense slots from 0, so slot 0 is the first
+/// valid cluster and matches IBM row 0 in [`crate::node::process_skins`]. With no valid
+/// joint at all nothing is fabricated (such a skin is dropped upstream) and the row stays
+/// zeroed.
+///
+/// Detection is exact: the row is only touched when every weight is exactly `0.0`, which
+/// the extractor emits only from its all-zero branch — any real influence is renormalized
+/// to a sum of `1.0`. Returns `true` when the fallback was applied.
+pub fn bind_unweighted_vertex(
+    indices: &mut [u16; MAX_WEIGHTS_PER_VERTEX],
+    weights: &mut [f32; MAX_WEIGHTS_PER_VERTEX],
+    has_valid_joint: bool,
+) -> bool {
+    if !has_valid_joint || weights.iter().any(|weight| *weight != 0.0) {
+        return false;
+    }
+    *indices = [0u16; MAX_WEIGHTS_PER_VERTEX];
+    *weights = [0.0f32; MAX_WEIGHTS_PER_VERTEX];
+    weights[0] = 1.0;
+    true
+}
 
 /// Result of mesh processing.
 pub struct ProcessedMeshes {
@@ -426,7 +635,8 @@ pub fn create_mesh_from_corners(
     let mut morph_target_count = 0usize;
     let mut morph_weights = Vec::new();
 
-    let handle = load_context.labeled_asset_scope(label, |_| {
+    // `label` is kept alive for the bounds warning below; the scope needs its own copy.
+    let handle = load_context.labeled_asset_scope(label.clone(), |_| {
         let mut bevy_mesh = Mesh::new(PrimitiveTopology::TriangleList, settings.load_meshes);
 
         let mut positions = Vec::with_capacity(corners.len());
@@ -476,7 +686,21 @@ pub fn create_mesh_from_corners(
 
             if has_tangent {
                 let t = ufbx_mesh.vertex_tangent[corner];
-                tangents.push([t.x as f32, t.y as f32, t.z as f32, 1.0]);
+                let tangent = Vec3::new(t.x as f32, t.y as f32, t.z as f32);
+                // Handedness: FBX stores the bitangent, Bevy/glTF expect
+                // `w = sign(dot(cross(N, T), B))`; fall back to 1.0 without one.
+                let w = if ufbx_mesh.vertex_bitangent.exists && ufbx_mesh.vertex_normal.exists {
+                    let n = ufbx_mesh.vertex_normal[corner];
+                    let b = ufbx_mesh.vertex_bitangent[corner];
+                    tangent_sign(
+                        Vec3::new(n.x as f32, n.y as f32, n.z as f32),
+                        tangent,
+                        Vec3::new(b.x as f32, b.y as f32, b.z as f32),
+                    )
+                } else {
+                    1.0
+                };
+                tangents.push([tangent.x, tangent.y, tangent.z, w]);
             }
 
             out_indices.push(out_i as u32);
@@ -503,6 +727,15 @@ pub fn create_mesh_from_corners(
 
         if !ufbx_mesh.skin_deformers.is_empty() {
             process_skinning_data(ufbx_mesh, corners, &mut bevy_mesh);
+
+            // glTF parity: with the Dynamic policy bevy_gltf bakes per-joint
+            // bounds onto the mesh asset (`bevy_gltf` loader `generate_skinned_mesh_bounds`)
+            // so `DynamicSkinnedMeshBounds` entities have data to work with.
+            if settings.skinned_mesh_bounds_policy == FbxSkinnedMeshBoundsPolicy::Dynamic
+                && let Err(err) = bevy_mesh.generate_skinned_mesh_bounds()
+            {
+                warn!("Failed to generate skinned mesh bounds for '{label}': {err}");
+            }
         }
 
         let (count, weights) = apply_morph_targets(ufbx_mesh, corners, &mut bevy_mesh)?;
@@ -589,9 +822,17 @@ fn apply_morph_targets(
     Ok((channels.len(), weights))
 }
 
-/// Process skinning data for expanded corner vertices (top-4 weights by magnitude).
+/// Process skinning data for expanded corner vertices (top-4 weights).
 ///
-/// Cluster indices are clamped to [`MAX_JOINTS`].
+/// Reads the flattened ufbx influence table (`SkinDeformer::vertices[]` /
+/// `weights[]`, indexed by `mesh.vertex_indices[corner]`) — O(vertices +
+/// weights) instead of the previous per-corner scan over every cluster's vertex
+/// list. Cluster indices are remapped through
+/// [`compact_cluster_slots`] so `JOINT_INDEX` values match the joint/IBM order
+/// produced by [`crate::node::process_skins`] even when invalid clusters are
+/// dropped or the joint cap truncates the list. Vertices with no usable influence are
+/// bound rigidly to slot 0 by [`bind_unweighted_vertex`] (reported in one warning per
+/// mesh) instead of collapsing to the origin.
 pub fn process_skinning_data(ufbx_mesh: &ufbx::Mesh, corners: &[u32], bevy_mesh: &mut Mesh) {
     let skin_deformer = &ufbx_mesh.skin_deformers[0];
     if !matches!(
@@ -604,44 +845,53 @@ pub fn process_skinning_data(ufbx_mesh: &ufbx::Mesh, corners: &[u32], bevy_mesh:
         );
     }
 
-    let cluster_count = skin_deformer.clusters.len().min(MAX_JOINTS);
+    let cluster_slots = compact_cluster_slots(
+        skin_deformer.clusters.len(),
+        |index| cluster_is_valid(&skin_deformer.clusters[index]),
+        MAX_JOINTS,
+    );
+
+    // `compact_cluster_slots` assigns dense slots from 0, so slot 0 exists exactly when
+    // at least one cluster is usable; `process_skins` drops the skin entirely otherwise.
+    let has_valid_joint = cluster_slots.iter().any(|slot| slot.is_some());
+
     let mut joint_indices = Vec::with_capacity(corners.len());
     let mut joint_weights = Vec::with_capacity(corners.len());
+    let mut fallback_vertices = 0usize;
 
     for &corner in corners {
         let logical = ufbx_mesh.vertex_indices[corner as usize] as usize;
-        let mut influences: Vec<(u16, f32)> = Vec::new();
+        let mut indices = [0u16; MAX_WEIGHTS_PER_VERTEX];
+        let mut weights = [0.0f32; MAX_WEIGHTS_PER_VERTEX];
 
-        for (cluster_index, cluster) in skin_deformer
-            .clusters
-            .iter()
-            .enumerate()
-            .take(cluster_count)
-        {
-            for (i, &vert_idx) in cluster.vertices.iter().enumerate() {
-                if vert_idx as usize == logical && i < cluster.weights.len() {
-                    let weight = cluster.weights[i] as f32;
-                    if weight.is_finite() && weight > 0.0 {
-                        influences.push((cluster_index as u16, weight));
-                    }
-                    break;
-                }
+        if let Some(skin_vertex) = skin_deformer.vertices.get(logical) {
+            let begin = skin_vertex.weight_begin as usize;
+            let end = begin
+                .saturating_add(skin_vertex.num_weights as usize)
+                .min(skin_deformer.weights.len());
+            // `List` only implements `Index<usize>`, so reach the slice via `get`.
+            if begin < end
+                && let Some(influences) = skin_deformer.weights.get(begin..end)
+            {
+                (indices, weights) = top4_influences(influences, &cluster_slots);
             }
         }
 
-        influences.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        influences.truncate(4);
-
-        let total: f32 = influences.iter().map(|(_, w)| *w).sum();
-        let mut indices = [0u16; 4];
-        let mut weights = [0.0f32; 4];
-        for (slot, (ji, w)) in influences.into_iter().enumerate() {
-            indices[slot] = ji;
-            weights[slot] = if total > 0.0 { w / total } else { 0.0 };
+        // A vertex missing from the influence table, or whose every influence was dropped,
+        // must not keep the zero row: the zero matrix collapses it to the origin.
+        if bind_unweighted_vertex(&mut indices, &mut weights, has_valid_joint) {
+            fallback_vertices += 1;
         }
 
         joint_indices.push(indices);
         joint_weights.push(weights);
+    }
+
+    if fallback_vertices > 0 {
+        warn!(
+            "FBX skin on mesh '{}': {fallback_vertices} vertex/vertices had no usable skin influence and were bound rigidly to the first joint",
+            ufbx_mesh.element.name
+        );
     }
 
     bevy_mesh.insert_attribute(

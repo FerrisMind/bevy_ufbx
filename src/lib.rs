@@ -9,7 +9,7 @@
 //!
 //! Supports meshes, PBR materials, skinned meshes, hierarchical scenes,
 //! lights/cameras, and (with the default `animation` feature) baked
-//! [`AnimationClip`](bevy::animation::AnimationClip)s via `ufbx::bake_anim`.
+//! Bevy `AnimationClip`s via `ufbx::bake_anim`.
 
 use bevy::asset::AssetApp;
 use bevy::prelude::*;

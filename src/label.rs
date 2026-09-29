@@ -8,7 +8,7 @@ pub enum FbxAssetLabel {
     Scene(usize),
     /// `Mesh{}`: parent [`FbxMesh`](crate::FbxMesh) container (glTF-aligned).
     Mesh(usize),
-    /// `Mesh{}/Primitive{}`: Bevy [`Mesh`](bevy::render::mesh::Mesh) for one
+    /// `Mesh{}/Primitive{}`: Bevy [`Mesh`](bevy::mesh::Mesh) for one
     /// material-split primitive of a parent FBX mesh (glTF-compatible path).
     Primitive {
         /// Index of the parent FBX mesh (one per mesh-bearing node / NURBS).
@@ -24,7 +24,7 @@ pub enum FbxAssetLabel {
     /// `Material{} (inverted)`: cull-inverted [`StandardMaterial`](bevy::pbr::StandardMaterial)
     /// for negative-scale nodes (not wrapped in [`FbxMaterial`](crate::FbxMaterial))
     MaterialInverted(usize),
-    /// `Animation{}`: FBX animation as a Bevy [`AnimationClip`](bevy::animation::AnimationClip)
+    /// `Animation{}`: FBX animation as a Bevy `AnimationClip` (`animation` feature)
     Animation(usize),
     /// `AnimationRest`: optional rest/bind pose clip (see [`crate::FbxLoaderSettings::generate_rest_animation`])
     AnimationRest,

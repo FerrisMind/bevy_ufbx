@@ -148,7 +148,7 @@ pub struct FbxCamera {
 // Scene Elements
 // ============================================================================
 
-/// One material-group primitive of an [`FbxMesh`] (glTF [`GltfPrimitive`] parity).
+/// One material-group primitive of an [`FbxMesh`] (glTF `GltfPrimitive` parity).
 #[derive(Debug, Clone)]
 pub struct FbxPrimitive {
     pub mesh: Handle<Mesh>,

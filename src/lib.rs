@@ -130,7 +130,10 @@ impl Plugin for FbxPlugin {
 ///    is how "not set by the user" is detected — the glTF-style
 ///    `Option<ImageSamplerDescriptor>` would be a breaking change.
 /// 3. This resource: the plugin-level default, used as the base when the
-///    per-load default is left at its default value.
+///    per-load default is left at its default value. Its built-in value is
+///    [`ImageSamplerDescriptor::linear()`] — mirroring `bevy_gltf`'s
+///    `GltfPlugin::default()` — not `ImageSamplerDescriptor::default()`
+///    (Nearest filters).
 ///
 /// The resolved base is what [`FbxLoaderSettings::default_sampler`] would
 /// otherwise be; `resolve_default_sampler` performs steps 2-3.
@@ -143,7 +146,10 @@ pub struct DefaultFbxImageSampler(Arc<Mutex<ImageSamplerDescriptor>>);
 
 impl Default for DefaultFbxImageSampler {
     fn default() -> Self {
-        Self::new(&ImageSamplerDescriptor::default())
+        // glTF parity: `GltfPlugin::default()` registers
+        // `ImageSamplerDescriptor::linear()`, not the Nearest-filter
+        // `ImageSamplerDescriptor::default()`.
+        Self::new(&ImageSamplerDescriptor::linear())
     }
 }
 
@@ -272,9 +278,11 @@ mod tests {
     #[test]
     fn plugin_build_inserts_default_sampler_resource() {
         let app = headless_app();
+        // Built-in default is `linear()`, matching `GltfPlugin::default()`
+        // (glTF parity); the per-load sentinel stays `default()`.
         assert_eq!(
             app.world().resource::<DefaultFbxImageSampler>().get(),
-            ImageSamplerDescriptor::default()
+            ImageSamplerDescriptor::linear()
         );
         assert_eq!(
             app.world().resource::<FbxCompressedImageFormatSupport>().0,

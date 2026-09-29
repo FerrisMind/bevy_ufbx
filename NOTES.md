@@ -35,7 +35,7 @@ current semantics honestly, including remaining correctness gaps.
 - `FbxNode`: `children` + `skin` handles filled (two-pass label reservation, glTF-style)
 - `FbxMaterial` container asset (glTF-style): `Material{N}` → `FbxMaterial` (`.material` is `StandardMaterial`); inverted twins stay `Material{N} (inverted)` as bare `StandardMaterial`
 - World **neg-scale**: odd count of negative axes on **world** scale (not local `sx*sy*sz`) selects `Material{N} (inverted)` cull twin (skips double-sided)
-- Texture samplers: FBX `wrap_u` / `wrap_v` → address modes; mag/min/mip from `FbxLoaderSettings::default_sampler` (or full replace via `override_sampler`) — ufbx 0.9 has no filter fields. Plugin-level default: `DefaultFbxImageSampler` resource; precedence `override_sampler` > per-load `default_sampler` (when explicitly set) > resource
+- Texture samplers: FBX `wrap_u` / `wrap_v` → address modes; mag/min/mip from `FbxLoaderSettings::default_sampler` (or full replace via `override_sampler`) — ufbx 0.9 has no filter fields. Plugin-level default: `DefaultFbxImageSampler` resource; precedence `override_sampler` > per-load `default_sampler` (when explicitly set) > resource > built-in default (base matches `bevy_gltf`'s `ImageSamplerDescriptor::linear()`); see `sampler_settings_fbx`
 - Blender PBR: `use_blender_pbr_material` when probe exporter is Blender binary/ascii
 - Anim takes: `Animation{N}` labels + `Fbx.named_animations["Take 001"]` map (no second name label)
 - Dual-published texture color space labels: `Texture{N}` (sRGB) / `Texture{N}/Linear`; packed labels
@@ -60,7 +60,8 @@ current semantics honestly, including remaining correctness gaps.
   in). `coat_glossiness` is deliberately not bound (gloss-inverting sampler doesn't exist; same
   precedent as the main roughness map).
 - **Plugin-level sampler + compressed formats**: `DefaultFbxImageSampler` resource (same API as
-  `DefaultGltfImageSampler`) with precedence `override_sampler` > per-load `default_sampler` > resource;
+  `DefaultGltfImageSampler`) with precedence `override_sampler` > per-load `default_sampler` >
+  resource > built-in default;
   the loader is registered in `FbxPlugin::build` sharing the resource's `Arc<Mutex<…>>`.
   `FbxPlugin::finish()` reads the render device's `CompressedImageFormatSupport` into
   `FbxCompressedImageFormatSupport` + a process-wide cache that texture code consumes (headless runs
@@ -227,12 +228,12 @@ Local `assets/` (visual examples + tests):
 |------|--------|
 | `blend_shape_cube.fbx` | morph / blend shapes (`morph_fbx`) |
 | `cube_anim.fbx` / `cube_anim_bevy.fbx` | TRS bake (`animated_mesh_fbx`) |
-| `cube.fbx` | static mesh / CLI default (`load_fbx`, `static_mesh_fbx` fallback) |
+| `cube.fbx` | static mesh / CLI default (`load_fbx`, `static_mesh_fbx` fallback, `dump_fbx` default) |
 | `maya_cube_7400_binary.fbx` | Maya cm cube |
 | `nurbs_saddle.fbx` | NURBS tessellate (`nurbs_fbx`) |
 | `rigged_triangle.fbx` | skin IBM / fallback for `skinned_mesh_fbx` |
 | `blender_279_sausage_7400_binary.fbx` | skinned character-ish + takes (`skinned_mesh_fbx`, `showcase_fbx`) |
-| `blender_279_internal_textures_7400_binary.fbx` | embedded textures (`textures_fbx`) |
+| `blender_279_internal_textures_7400_binary.fbx` | embedded textures + PBR scalar / sampler-precedence demos (`textures_fbx`, `materials_pbr_fbx`, `sampler_settings_fbx`) |
 | `blender_282_suzanne_7400_binary.fbx` | Blender AdjustTransforms static mesh |
 | `blender_279_nested_meshes_7400_binary.fbx` | nested mesh hierarchy (`nested_meshes_fbx`) |
 | `blender_suzanne_multimaterial_7400_binary.fbx` | material-split primitives / color regions (`multimaterial_fbx`, `showcase_fbx`) |

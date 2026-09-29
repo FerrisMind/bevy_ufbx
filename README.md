@@ -120,7 +120,8 @@ top-level nodes keep the requested conversion without entering animation name pa
   `Texture{N}` / `Texture{N}/Linear`), per-map UV channel (`*_channel`), load-time packing (opacity luminance
   mask → base-color alpha; separate metallic/roughness → G/B) for embedded **and pre-read external** textures,
   external reference resolution (adjacent basename / `.fbm`), wrap modes (sampler precedence:
-  `override_sampler` > per-load `default_sampler` > plugin-level `DefaultFbxImageSampler` resource)
+  `override_sampler` > per-load `default_sampler` > plugin-level `DefaultFbxImageSampler` resource
+  > built-in default)
 - Specular / anisotropy / clearcoat: `pbr.specular_factor` → `reflectance` (×0.5, the `bevy_gltf`
   formula), `specular_color` → `specular_tint`, `specular_anisotropy`/`specular_rotation` →
   `anisotropy_strength`/`anisotropy_rotation`, coat → `clearcoat`/`clearcoat_perceptual_roughness`;
@@ -156,7 +157,7 @@ modifying Bevy itself or the ufbx parser (listed under Engine-locked limits / En
 | Specular / anisotropy / clearcoat scalars | from KHR extensions | `reflectance = specular_factor×0.5`, `specular_tint`, `anisotropy_strength`/`rotation`, `clearcoat`/`clearcoat_perceptual_roughness` from ufbx PBR maps (authored only) | Parity |
 | Clearcoat textures | behind `pbr_multi_layer_material_textures` | same-named default-off feature → `clearcoat_texture` / `clearcoat_roughness_texture` / `clearcoat_normal_texture` | Parity |
 | Texture color space / packing / pre-read externals | sRGB vs linear by glTF usage | dual-published `Texture{N}` / `Texture{N}/Linear`, opacity + metal/rough packs, pre-read external bytes | Parity+ |
-| Default sampler resource | `DefaultGltfImageSampler` | `DefaultFbxImageSampler`, same API; precedence `override_sampler` > per-load `default_sampler` > resource | Parity |
+| Default sampler resource | `DefaultGltfImageSampler` | `DefaultFbxImageSampler`, same API; precedence `override_sampler` > per-load `default_sampler` > resource > built-in default | Parity |
 | Sampler mag/min/mip filters | from glTF sampler | not available — ufbx 0.9 typed API exposes only wrap modes | **Locked** (parser) |
 | Compressed image formats | `CompressedImageFormatSupport` read in `GltfPlugin::finish` | same pattern via `FbxPlugin::finish` → `FbxCompressedImageFormatSupport` + load-time cache; decode failure = warn + fallback (bevy_gltf fails the load) | Parity+ (deliberate) |
 | Animation: linear / step / constant | uneven, stepped, constant curves | same + step-aware baked curves | Parity |
@@ -307,14 +308,36 @@ cargo run --example static_mesh_fbx        # hierarchy + materials + units (Suza
 cargo run --example multimaterial_fbx      # material-split primitives (color regions)
 cargo run --example nested_meshes_fbx      # nested mesh hierarchy (cube/cone/ico/plane)
 cargo run --example textures_fbx           # embedded textures + wrap
+cargo run --example materials_pbr_fbx      # PBR scalar parity: specular reflectance, anisotropy, clearcoat
+cargo run --example sampler_settings_fbx   # texture-sampler precedence chain (4 tiers, see below)
 cargo run --example lights_cameras_fbx     # FBX DirectionalLight + activated Camera3d
 cargo run --example vertex_color_fbx       # Mesh ATTRIBUTE_COLOR (ZBrush painted verts)
 cargo run --example neg_scale_fbx          # mirrored mesh → Material{N} (inverted) cull
 cargo run --example showcase_fbx           # morph | anim | nurbs | skin | multi-mat
 cargo run --example load_fbx               # generic CLI loader (defaults to cube.fbx)
 cargo run --example load_fbx -- cube.fbx
-cargo run --example dump_fbx -- cube.fbx   # headless asset dump
+cargo run --example dump_fbx -- cube.fbx   # full headless introspection dump (see below)
 ```
+
+Example notes for the three newest entries:
+
+- `materials_pbr_fbx` — PBR scalar parity: ufbx `specular_factor × 0.5` → `reflectance`,
+  `specular_color` → `specular_tint`, `specular_anisotropy`/`specular_rotation` →
+  `anisotropy_strength`/`anisotropy_rotation`, coat → `clearcoat`/`clearcoat_perceptual_roughness`.
+  The clearcoat **texture** slots (`clearcoat_texture` / `clearcoat_roughness_texture` /
+  `clearcoat_normal_texture`) demonstrate only when built with
+  `--features pbr_multi_layer_material_textures` — the `StandardMaterial` fields compile out
+  without it, and the example prints which variant it was built with.
+- `sampler_settings_fbx` — texture-sampler precedence, strongest first:
+  `FbxLoaderSettings::override_sampler` > `FbxLoaderSettings::default_sampler` >
+  `DefaultFbxImageSampler` resource > built-in default (base matches `bevy_gltf`'s
+  `ImageSamplerDescriptor::linear()`). Four instances of one FBX side by side, each tier winning
+  over everything below it.
+- `dump_fbx` — full headless introspection dump: prints every loader output — asset-label lists
+  and `FbxAssetLabel` resolution, `FbxMesh` / primitive names, scene-root components
+  (`Name` / `FbxSceneName` / `FbxSceneExtras`), per-entity `Aabb`, camera `is_active` activation,
+  light `range` / `radius`, `StandardMaterial` scalars and textures, `FbxExtras` blobs, and — on
+  failure — the granular `FbxError`.
 
 ## License
 

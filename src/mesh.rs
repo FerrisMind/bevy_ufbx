@@ -10,7 +10,7 @@ use bevy::mesh::morph::{MAX_MORPH_WEIGHTS, MorphAttributes, MorphWeights};
 use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::pbr::StandardMaterial;
 use bevy::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Bevy LBS joint limit (must match [`bevy::mesh::skinning::SkinnedMesh`]).
 ///
@@ -224,6 +224,72 @@ pub fn bind_unweighted_vertex(
     true
 }
 
+/// Mesh `element_id`s for which at least one skin instance actually references
+/// the mesh — i.e. [`crate::node::process_skins`] will emit an
+/// [`FbxSkin`](crate::FbxSkin) for
+/// at least one node instancing it.
+///
+/// D6 / glTF parity: `bevy_gltf` keeps `JOINTS_0`/`WEIGHTS_0` only on
+/// primitives used by skinned nodes and drops them otherwise
+/// (`references/bevy_gltf/src/loader/mod.rs:759-770`), so non-skinned meshes
+/// must not carry `JOINT_INDEX`/`JOINT_WEIGHT`.
+///
+/// This mirrors `process_skins` exactly (it runs after mesh export, so its
+/// decision must be predicted up front): the first skin deformer on the mesh
+/// must have at least one usable cluster ([`cluster_is_valid`] — a bone node
+/// and a finite inverse bind matrix), and every usable cluster's bone node
+/// must resolve among `scene.nodes`, the conditions under which `process_skins`
+/// drops the skin (joint count 0 / unresolved joint). The decision is
+/// per mesh element — `process_skins` evaluates the same mesh-level data for
+/// every instancing node — so a mesh in this set has at least one node carrying
+/// a `SkinnedMesh` and its primitives must keep joint attributes; every other
+/// mesh must lose them.
+///
+/// Meshes reached only through NURBS tessellation never appear here: their
+/// nodes have no `node.mesh`, so `process_skins` cannot emit a skin for them.
+pub fn skin_instanced_mesh_elements(scene: &ufbx::Scene) -> HashSet<u32> {
+    let node_element_ids: HashSet<u32> = scene
+        .nodes
+        .as_ref()
+        .iter()
+        .map(|node| node.element.element_id)
+        .collect();
+
+    let mut skinned_meshes = HashSet::new();
+    for node in scene.nodes.as_ref().iter() {
+        let Some(mesh_ref) = node.mesh.as_ref() else {
+            continue;
+        };
+        let mesh = mesh_ref.as_ref();
+        if mesh.skin_deformers.is_empty() {
+            continue;
+        }
+        let skin_deformer = &mesh.skin_deformers[0];
+
+        let mut has_usable_cluster = false;
+        let mut unresolved_joint = false;
+        for cluster in skin_deformer.clusters.iter() {
+            if !cluster_is_valid(cluster) {
+                continue;
+            }
+            has_usable_cluster = true;
+            // `cluster_is_valid` guarantees `bone_node` is `Some`; a valid bone
+            // node outside `scene.nodes` makes `process_skins` drop the skin.
+            let Some(bone_node) = cluster.bone_node.as_ref() else {
+                continue;
+            };
+            if !node_element_ids.contains(&bone_node.element.element_id) {
+                unresolved_joint = true;
+                break;
+            }
+        }
+        if has_usable_cluster && !unresolved_joint {
+            skinned_meshes.insert(mesh.element.element_id);
+        }
+    }
+    skinned_meshes
+}
+
 /// Result of mesh processing.
 pub struct ProcessedMeshes {
     /// Parent FBX mesh containers (`Mesh{N}` labels).
@@ -267,6 +333,9 @@ pub fn process_meshes(
     let mut parent_mesh_index = 0usize;
     // ufbx mesh `element_id` → already-exported assets (instance sharing).
     let mut processed_mesh_elements: HashMap<u32, SharedMeshExport> = HashMap::new();
+    // D6: only meshes a skin instance actually references keep JOINT_INDEX /
+    // JOINT_WEIGHT (glTF parity: joints/weights exist only on skinned primitives).
+    let skin_instanced = skin_instanced_mesh_elements(scene);
 
     // Tessellate NURBS first so MeshRoot ownership is stable.
     let mut tessellated: Vec<(u32, String, Mat4, ufbx::MeshRoot)> = Vec::new();
@@ -329,6 +398,7 @@ pub fn process_meshes(
             node.element.element_id,
             &node.element.name,
             geometry_to_node,
+            skin_instanced.contains(&mesh.element.element_id),
             settings,
             load_context,
             standard_materials,
@@ -374,12 +444,15 @@ pub fn process_meshes(
             continue;
         }
 
+        // D6: a tessellated NURBS root comes from nodes without `node.mesh`,
+        // so `process_skins` can never emit a skin for it — never skinned.
         let created = append_mesh_primitives(
             scene,
             mesh,
             *element_id,
             name,
             *geometry_to_node,
+            false,
             settings,
             load_context,
             standard_materials,
@@ -450,6 +523,7 @@ fn append_mesh_primitives(
     element_id: u32,
     node_name: &str,
     geometry_to_node: Mat4,
+    skinned: bool,
     settings: &FbxLoaderSettings,
     load_context: &mut LoadContext,
     standard_materials: &[Handle<StandardMaterial>],
@@ -486,6 +560,7 @@ fn append_mesh_primitives(
         let (mesh_handle, morph_target_count, morph_weights) = create_mesh_from_corners(
             mesh,
             &corner_indices,
+            skinned,
             parent_mesh_index,
             group_index,
             settings,
@@ -513,6 +588,14 @@ fn append_mesh_primitives(
             named_standard_materials,
         );
 
+        // H-MESH (glTF parity): `GltfPrimitive`/`primitive_name` carry
+        // `"{mesh}.{material}"` (or just the mesh name when the primitive has
+        // no material slot / unnamed material) — see `FbxPrimitive::name_for`.
+        let primitive_name = Some(FbxPrimitive::name_for(
+            mesh.element.name.as_ref(),
+            (material_idx < mesh.materials.len()).then_some(material_name.as_str()),
+        ));
+
         node_primitives.push(NodeMeshPrimitive {
             mesh: mesh_handle.clone(),
             mesh_index: parent_mesh_index,
@@ -526,10 +609,7 @@ fn append_mesh_primitives(
         fbx_primitives.push(FbxPrimitive {
             mesh: mesh_handle.clone(),
             material,
-            // Mechanical unblock (L-PLUGIN D7): populate via
-            // `FbxPrimitive::name_for(mesh_name, material_name)` once the mesh
-            // name is available here; see .swarm/results/wave1-plugin.md.
-            name: None,
+            name: primitive_name,
             extras: mesh_extras.clone(),
         });
         primitive_meshes.push(mesh_handle);
@@ -622,10 +702,17 @@ pub fn group_faces_by_material(mesh: &ufbx::Mesh) -> HashMap<usize, Vec<u32>> {
 ///
 /// Labeled as [`FbxAssetLabel::Primitive`] (`Mesh{parent}/Primitive{i}`).
 ///
+/// `skinned` is the D6 guard: `JOINT_INDEX`/`JOINT_WEIGHT` attributes (and the
+/// dynamic skinned bounds that consume them) are written only when at least
+/// one skin instance actually references this mesh — see
+/// [`skin_instanced_mesh_elements`]. Non-skinned meshes carry no joint
+/// attributes, mirroring `bevy_gltf` (`loader/mod.rs:759-770`).
+///
 /// Returns `(handle, morph_target_count, default_morph_weights)`.
 pub fn create_mesh_from_corners(
     ufbx_mesh: &ufbx::Mesh,
     corners: &[u32],
+    skinned: bool,
     parent_mesh_index: usize,
     primitive_index: usize,
     settings: &FbxLoaderSettings,
@@ -729,7 +816,8 @@ pub fn create_mesh_from_corners(
             let _ = bevy_mesh.generate_tangents();
         }
 
-        if !ufbx_mesh.skin_deformers.is_empty() {
+        // D6 guard: joints/weights only when a skin instance uses this mesh.
+        if skinned {
             process_skinning_data(ufbx_mesh, corners, &mut bevy_mesh);
 
             // glTF parity: with the Dynamic policy bevy_gltf bakes per-joint
@@ -817,11 +905,16 @@ fn apply_morph_targets(
 
     bevy_mesh
         .try_set_morph_targets(morph_attrs)
-        .map_err(|e| FbxError::MeshConversion(format!("morph targets: {e}")))?;
+        .map_err(|e| FbxError::MorphTargets {
+            mesh: ufbx_mesh.element.name.to_string(),
+            message: format!("morph targets: {e}"),
+        })?;
     bevy_mesh.set_morph_target_names(names);
 
-    let _ = MorphWeights::new(weights.clone(), None)
-        .map_err(|e| FbxError::MeshConversion(format!("morph weights: {e}")))?;
+    let _ = MorphWeights::new(weights.clone(), None).map_err(|e| FbxError::MorphTargets {
+        mesh: ufbx_mesh.element.name.to_string(),
+        message: format!("morph weights: {e}"),
+    })?;
 
     Ok((channels.len(), weights))
 }

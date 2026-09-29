@@ -54,6 +54,46 @@ jobs:
       - name: Check tests
         run: cargo test --no-run
 
+  # ── Feature-off compile check ─────────────────────────────────────────────
+  # The library must compile warning-free without the default `animation`
+  # feature (mirrors the default-features `Check` job shape).
+  check-no-default-features:
+    name: Check (no-default-features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-check-nodefault-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-check-nodefault-
+            ${{ runner.os }}-cargo-
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev \
+            libudev-dev \
+            libwayland-dev \
+            libxkbcommon-dev
+
+      - name: Check lib without default features
+        run: cargo check --lib --no-default-features
+        env:
+          RUSTFLAGS: "-C debuginfo=0 -D warnings"
+
   # ── Unit & integration tests ──────────────────────────────────────────────
   test:
     name: Tests

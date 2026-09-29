@@ -69,10 +69,17 @@ pub(super) enum TextureSlot {
     Roughness,
     MetallicRoughness,
     Occlusion,
+    /// Clearcoat strength (`KHR_materials_clearcoat` `clearcoatTexture`).
+    Clearcoat,
+    /// Clearcoat roughness (`clearcoatRoughnessTexture`).
+    ClearcoatRoughness,
+    /// Clearcoat layer normal (`clearcoatNormalTexture`).
+    ClearcoatNormal,
 }
 
 impl TextureSlot {
-    /// Color space of the slot, mirroring `bevy_gltf`'s linear-texture set.
+    /// Color space of the slot, mirroring `bevy_gltf`'s linear-texture set
+    /// (all clearcoat maps are non-color data there too).
     pub(super) fn color_space(self) -> ColorSpace {
         match self {
             TextureSlot::BaseColor | TextureSlot::Emissive | TextureSlot::Opacity => {
@@ -82,7 +89,10 @@ impl TextureSlot {
             | TextureSlot::Metalness
             | TextureSlot::Roughness
             | TextureSlot::MetallicRoughness
-            | TextureSlot::Occlusion => ColorSpace::Linear,
+            | TextureSlot::Occlusion
+            | TextureSlot::Clearcoat
+            | TextureSlot::ClearcoatRoughness
+            | TextureSlot::ClearcoatNormal => ColorSpace::Linear,
         }
     }
 
@@ -191,6 +201,30 @@ pub(super) fn slot_bindings(material: &ufbx::Material) -> Vec<SlotBinding<'_>> {
         TextureSlot::Occlusion,
         map_texture(&pbr.ambient_occlusion),
     );
+
+    // Clearcoat maps compose like `bevy_gltf`'s KHR_materials_clearcoat, where
+    // factor and texture arrive with the same extension: ufbx's `features.coat`
+    // gate keeps the textures consistent with the `apply_coat` scalars. Only
+    // `coat_roughness` binds (not `coat_glossiness`): ufbx moves a
+    // glossiness-authored map and its texture to `coat_glossiness`, and Bevy
+    // has no gloss-inverting sampler — same precedent as the main roughness map.
+    if material.features.coat.enabled {
+        push_binding(
+            &mut out,
+            TextureSlot::Clearcoat,
+            map_texture(&pbr.coat_factor),
+        );
+        push_binding(
+            &mut out,
+            TextureSlot::ClearcoatRoughness,
+            map_texture(&pbr.coat_roughness),
+        );
+        push_binding(
+            &mut out,
+            TextureSlot::ClearcoatNormal,
+            map_texture(&pbr.coat_normal),
+        );
+    }
 
     for texture_ref in material.textures.iter() {
         let Some(slot) = TextureSlot::from_prop(texture_ref.material_prop.as_ref()) else {
@@ -574,27 +608,21 @@ fn process_textures_internal_impl(
     })
 }
 
-/// Compressed texture formats this build can actually decode.
+/// Compressed texture formats the current render device supports.
 ///
 /// `bevy_gltf` receives `CompressedImageFormatSupport` (the GPU feature truth)
-/// at plugin `finish()` time; a `LoadContext` has no access to it, so the set is
-/// derived from the decoders compiled into `bevy_image` (`ImageFormat` variants
-/// only exist for enabled features). Compressed containers without a decoder are
-/// reported and skipped instead of being decoded into GPU formats the device may
-/// not support. See `NOTES.md` for the follow-up.
+/// at plugin `finish()` time and passes it into `GltfLoader`; a `LoadContext`
+/// has no ECS access, so texture processing reads the value `FbxPlugin::finish`
+/// recorded in [`crate::cached_supported_compressed_formats`]. Until a plugin
+/// has finished (headless tests, `App::update`-only harnesses) the cache
+/// reports [`CompressedImageFormats::NONE`], so compressed containers are
+/// reported and skipped exactly as `bevy_gltf` skips formats the device does
+/// not support — never decoded into GPU formats the device may not support.
+/// Decoders that are not compiled into `bevy_image` are still rejected earlier
+/// by [`embedded_image_format`]; failure to decode stays warn + fallback
+/// instead of failing the load (locked superset over `bevy_gltf`).
 fn compressed_image_formats() -> CompressedImageFormats {
-    let mut formats = CompressedImageFormats::NONE;
-    if ImageFormat::from_extension("dds").is_some() {
-        formats |= CompressedImageFormats::BC;
-    }
-    if ImageFormat::from_extension("ktx2").is_some()
-        || ImageFormat::from_extension("basis").is_some()
-    {
-        formats |= CompressedImageFormats::BC
-            | CompressedImageFormats::ASTC_LDR
-            | CompressedImageFormats::ETC2;
-    }
-    formats
+    crate::cached_supported_compressed_formats()
 }
 
 /// Image container detected from magic bytes, when recognized.
@@ -953,16 +981,47 @@ pub(super) fn material_uv_orderings(scene: &ufbx::Scene) -> HashMap<usize, Mater
             continue;
         };
         for material in &node.materials {
-            let Some(index) = dense.get(&material.element.element_id).copied() else {
+            let Some(index) = dense.get(&material.element.element_id) else {
                 continue;
             };
-            let entry = orderings.entry(index).or_default();
+            let entry = orderings.entry(*index).or_default();
             for (ordinal, uv_set) in mesh.uv_sets.as_ref().iter().enumerate() {
                 entry.insert(&uv_set.name, ordinal as u32);
             }
         }
     }
     orderings
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// H5: the decode path consumes the plugin's cached device support, so a
+    /// run without a finished `FbxPlugin` (headless tests) filters compressed
+    /// containers down to whatever the cache reports — `NONE` until
+    /// [`crate::FbxPlugin::finish`] records the render device's formats.
+    #[test]
+    fn compressed_image_formats_follow_the_plugin_cache() {
+        assert_eq!(
+            compressed_image_formats(),
+            crate::cached_supported_compressed_formats()
+        );
+    }
+
+    /// Clearcoat maps are non-color data: `bevy_gltf` loads all three
+    /// `KHR_materials_clearcoat` textures linear (`gltf_ext/mod.rs:75-83`) and
+    /// bevy_pbr documents them as "must not be loaded as sRGB".
+    #[test]
+    fn clearcoat_slots_decode_linear() {
+        for slot in [
+            TextureSlot::Clearcoat,
+            TextureSlot::ClearcoatRoughness,
+            TextureSlot::ClearcoatNormal,
+        ] {
+            assert_eq!(slot.color_space(), ColorSpace::Linear, "{slot:?}");
+        }
+    }
 }
 
 /// UV sampling identity of one texture reference: the channel ordinal a user

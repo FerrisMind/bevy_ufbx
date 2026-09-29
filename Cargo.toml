@@ -12,6 +12,11 @@ categories = ["game-development", "graphics"]
 [features]
 default = ["animation"]
 animation = ["bevy/bevy_animation", "bevy/morph_animation"]
+# Forwards bevy's opt-in clearcoat texture slots: `StandardMaterial` only has
+# `clearcoat_texture`/`clearcoat_roughness_texture`/`clearcoat_normal_texture`
+# (and their `_channel` fields) when bevy_pbr compiles them in. Default-off,
+# matching bevy/bevy_gltf where the feature is not in `default`.
+pbr_multi_layer_material_textures = ["bevy/pbr_multi_layer_material_textures"]
 
 [dependencies]
 bevy = { version = "0.19", default-features = false, features = [

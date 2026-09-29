@@ -566,3 +566,148 @@ fn jpeg_texture_decoder_is_available() {
         }
     }
 }
+
+/// ufbx resolves the physical material's coat maps: `coat_map` and
+/// `coat_rough_map` share one texture, `coat_bump_map` shares the bump map,
+/// and the coat feature is enabled. The loader's clearcoat bindings read
+/// exactly these maps; this half runs regardless of bevy's clearcoat texture
+/// fields (the ufbx data side of G6 must not regress either way).
+#[test]
+fn fixture_exposes_coat_maps() {
+    let Some(corpus) = corpus_or_skip("fixture_exposes_coat_maps") else {
+        return;
+    };
+    let path = corpus.join("max_physical_material_textures_6100_binary.fbx");
+    let scene =
+        ufbx::load_file(path.to_string_lossy().as_ref(), ufbx::LoadOpts::default()).expect("ufbx");
+    let material = scene
+        .materials
+        .as_ref()
+        .iter()
+        .find(|material| material.element.name == "PhysicalMaterial")
+        .expect("PhysicalMaterial");
+
+    assert!(
+        material.features.coat.enabled,
+        "3ds Max physical materials enable the coat feature by default"
+    );
+    let coat = material
+        .pbr
+        .coat_factor
+        .texture
+        .as_deref()
+        .expect("coat_factor texture");
+    let roughness = material
+        .pbr
+        .coat_roughness
+        .texture
+        .as_deref()
+        .expect("coat_roughness texture");
+    let normal = material
+        .pbr
+        .coat_normal
+        .texture
+        .as_deref()
+        .expect("coat_normal texture");
+    let bump = material
+        .pbr
+        .normal_map
+        .texture
+        .as_deref()
+        .expect("normal map texture");
+    assert_eq!(
+        coat.element.element_id, roughness.element.element_id,
+        "the fixture binds one texture to both coat maps"
+    );
+    assert_eq!(
+        normal.element.element_id, bump.element.element_id,
+        "coat_bump_map and bump_map reference the same texture"
+    );
+}
+
+/// G6: the loader binds the coat maps onto `StandardMaterial`'s clearcoat
+/// texture slots (bevy_pbr compiles them with `pbr_multi_layer_material_textures`),
+/// linearly, on the fixture's UV0 — while the scalar factors keep coming from
+/// the ufbx values, so texture and factor compose in the shader the way
+/// `bevy_gltf` composes KHR_materials_clearcoat.
+#[cfg(feature = "pbr_multi_layer_material_textures")]
+#[test]
+fn clearcoat_textures_bind_from_the_physical_material() {
+    let Some(corpus) = corpus_or_skip("clearcoat_textures_bind_from_the_physical_material") else {
+        return;
+    };
+    let file = "max_physical_material_textures_6100_binary.fbx";
+    let (mut app, fbx_handle) = load_fixture(&corpus, file);
+    let (material, _) = material_by_name(&mut app, &fbx_handle, "PhysicalMaterial");
+
+    let coat = material
+        .clearcoat_texture
+        .clone()
+        .expect("clearcoat texture");
+    let roughness = material
+        .clearcoat_roughness_texture
+        .clone()
+        .expect("clearcoat roughness texture");
+    let normal = material
+        .clearcoat_normal_texture
+        .clone()
+        .expect("clearcoat normal texture");
+
+    // One source texture feeds factor and roughness, another feeds the bump
+    // and coat-bump slots: identical sources must produce identical handles.
+    assert_eq!(coat, roughness, "coat factor and roughness share a map");
+    assert_eq!(
+        normal,
+        material
+            .normal_map_texture
+            .clone()
+            .expect("main normal map texture"),
+        "coat normal and main normal share a map"
+    );
+
+    // The fixture's mesh orders its single UV set (`UVChannel_1`) first.
+    assert!(matches!(material.clearcoat_channel, UvChannel::Uv0));
+    assert!(matches!(
+        material.clearcoat_roughness_channel,
+        UvChannel::Uv0
+    ));
+    assert!(matches!(material.clearcoat_normal_channel, UvChannel::Uv0));
+
+    // Non-color decode: clearcoat maps must not be sRGB.
+    let images = app.world().resource::<Assets<Image>>();
+    assert_eq!(
+        images
+            .get(&coat)
+            .expect("coat image")
+            .texture_descriptor
+            .format,
+        TextureFormat::Rgba8Unorm
+    );
+    assert_eq!(
+        images
+            .get(&normal)
+            .expect("coat normal image")
+            .texture_descriptor
+            .format,
+        TextureFormat::Rgba8Unorm
+    );
+
+    // Scalar composition stays on the ufbx-authored factors; the shader
+    // multiplies them with the sampled texels (no CPU-side fold).
+    let path = corpus.join(file).to_string_lossy().into_owned();
+    let scene = ufbx::load_file(&path, ufbx::LoadOpts::default()).expect("ufbx");
+    let source = scene
+        .materials
+        .as_ref()
+        .iter()
+        .find(|material| material.element.name == "PhysicalMaterial")
+        .expect("PhysicalMaterial");
+    assert_eq!(
+        material.clearcoat,
+        source.pbr.coat_factor.value_vec4.x as f32
+    );
+    assert_eq!(
+        material.clearcoat_perceptual_roughness,
+        source.pbr.coat_roughness.value_vec4.x as f32
+    );
+}

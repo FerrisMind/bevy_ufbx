@@ -3,8 +3,8 @@
 //! # Texture color space (parity with `bevy_gltf`)
 //!
 //! Color slots (base color, emissive) are decoded as sRGB; data slots (normal,
-//! metallic/roughness, occlusion) are decoded linear, mirroring `bevy_gltf`'s
-//! `is_srgb = !linear_textures.contains(..)`. A texture that feeds both kinds of
+//! metallic/roughness, occlusion, clearcoat) are decoded linear, mirroring
+//! `bevy_gltf`'s `is_srgb = !linear_textures.contains(..)`. A texture that feeds both kinds of
 //! slots is decoded once per color space and published under two labels:
 //! `Texture{N}` for the sRGB variant and `Texture{N}/Linear` for the linear one
 //! (`N` is the dense texture index, like every other `FbxAssetLabel`).
@@ -241,6 +241,11 @@ fn binding_uv_channel(
 }
 
 /// Handles and channel/transform choices for one material's texture slots.
+///
+/// The clearcoat fields are always resolved but only consumed when bevy_pbr
+/// compiles its clearcoat texture fields in (bevy's opt-in
+/// `pbr_multi_layer_material_textures` feature, forwarded by this crate); the
+/// allow keeps feature-off builds warning-free while the handles are written.
 #[derive(Default)]
 struct MaterialSlots {
     base_color: Option<Handle<Image>>,
@@ -252,6 +257,12 @@ struct MaterialSlots {
     normal_map: Option<(Handle<Image>, UvChannel)>,
     metallic_roughness: Option<(Handle<Image>, UvChannel)>,
     occlusion: Option<(Handle<Image>, UvChannel)>,
+    #[cfg_attr(not(feature = "pbr_multi_layer_material_textures"), allow(dead_code))]
+    clearcoat: Option<(Handle<Image>, UvChannel)>,
+    #[cfg_attr(not(feature = "pbr_multi_layer_material_textures"), allow(dead_code))]
+    clearcoat_roughness: Option<(Handle<Image>, UvChannel)>,
+    #[cfg_attr(not(feature = "pbr_multi_layer_material_textures"), allow(dead_code))]
+    clearcoat_normal: Option<(Handle<Image>, UvChannel)>,
     /// An opacity texture is bound to the material (alpha_mode heuristic).
     opacity_texture_present: bool,
 }
@@ -291,6 +302,13 @@ fn resolve_material_slots(
             TextureSlot::Emissive => slots.emissive = handle.map(|handle| (handle, channel)),
             TextureSlot::NormalMap => slots.normal_map = handle.map(|handle| (handle, channel)),
             TextureSlot::Occlusion => slots.occlusion = handle.map(|handle| (handle, channel)),
+            TextureSlot::Clearcoat => slots.clearcoat = handle.map(|handle| (handle, channel)),
+            TextureSlot::ClearcoatRoughness => {
+                slots.clearcoat_roughness = handle.map(|handle| (handle, channel))
+            }
+            TextureSlot::ClearcoatNormal => {
+                slots.clearcoat_normal = handle.map(|handle| (handle, channel))
+            }
             TextureSlot::Opacity => {
                 slots.opacity_texture_present = true;
                 opacity_channel = Some(channel);
@@ -476,6 +494,29 @@ fn build_standard_material(
     if let Some((handle, channel)) = &slots.occlusion {
         material.occlusion_texture = Some(handle.clone());
         material.occlusion_channel = channel.clone();
+    }
+
+    // Clearcoat textures, KHR_materials_clearcoat composition: the scalar
+    // `apply_coat` factors and the textures bind independently and the shader
+    // multiplies the sampled texel by the factor (bevy_pbr-0.19.1
+    // pbr_material.rs: "Values sampled from this texture are multiplied by the
+    // main clearcoat factor"), so no CPU-side multiplication happens here —
+    // same as BG loader/mod.rs:1460-1474. The fields only exist when bevy_pbr
+    // compiles them in (bevy's opt-in `pbr_multi_layer_material_textures`).
+    #[cfg(feature = "pbr_multi_layer_material_textures")]
+    {
+        if let Some((handle, channel)) = &slots.clearcoat {
+            material.clearcoat_texture = Some(handle.clone());
+            material.clearcoat_channel = channel.clone();
+        }
+        if let Some((handle, channel)) = &slots.clearcoat_roughness {
+            material.clearcoat_roughness_texture = Some(handle.clone());
+            material.clearcoat_roughness_channel = channel.clone();
+        }
+        if let Some((handle, channel)) = &slots.clearcoat_normal {
+            material.clearcoat_normal_texture = Some(handle.clone());
+            material.clearcoat_normal_channel = channel.clone();
+        }
     }
 
     // Only force alpha when opacity/transparency was actually authored.
@@ -744,6 +785,48 @@ mod tests {
         assert_eq!(standard.specular_tint, Color::linear_rgb(0.0, 0.0, 0.0));
         assert_eq!(standard.anisotropy_strength, 0.0);
         assert_eq!(standard.anisotropy_rotation, 0.0);
+    }
+
+    /// G6: clearcoat texture slots land on the `StandardMaterial` clearcoat
+    /// texture fields (bevy_pbr compiles them with its
+    /// `pbr_multi_layer_material_textures` feature). The scalar factors are
+    /// applied separately by `apply_coat`, so factor and texture compose in
+    /// the shader exactly like `bevy_gltf`'s KHR_materials_clearcoat mapping.
+    #[cfg(feature = "pbr_multi_layer_material_textures")]
+    #[test]
+    fn clearcoat_textures_bind_their_own_standard_material_slots() {
+        let bytes = include_bytes!("../assets/zbrush_vertex_color_7500_ascii.fbx");
+        let root = ufbx::load_memory(
+            bytes,
+            ufbx::LoadOpts {
+                load_external_files: false,
+                ..Default::default()
+            },
+        )
+        .expect("parse corpus fixture");
+        let source = &root.materials.as_ref()[0];
+
+        // Two distinct placeholder handles so a swapped binding fails.
+        let strength = Handle::<Image>::default();
+        let roughness = Handle::<Image>::Uuid(Default::default(), Default::default());
+        assert_ne!(strength, roughness, "placeholder handles must differ");
+        let slots = MaterialSlots {
+            clearcoat: Some((strength.clone(), UvChannel::Uv1)),
+            clearcoat_roughness: Some((roughness.clone(), UvChannel::Uv0)),
+            clearcoat_normal: Some((strength.clone(), UvChannel::Uv0)),
+            ..Default::default()
+        };
+
+        let material = build_standard_material(source, &slots);
+        assert_eq!(material.clearcoat_texture, Some(strength.clone()));
+        assert!(matches!(material.clearcoat_channel, UvChannel::Uv1));
+        assert_eq!(material.clearcoat_roughness_texture, Some(roughness));
+        assert!(matches!(
+            material.clearcoat_roughness_channel,
+            UvChannel::Uv0
+        ));
+        assert_eq!(material.clearcoat_normal_texture, Some(strength));
+        assert!(matches!(material.clearcoat_normal_channel, UvChannel::Uv0));
     }
 
     #[test]

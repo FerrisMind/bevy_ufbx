@@ -202,6 +202,8 @@ pub struct FbxNode {
     pub skin: Option<Handle<FbxSkin>>,
     pub transform: Transform,
     pub visible: bool,
+    /// Optional custom-property extras blob (glTF `GltfNode::extras` parity).
+    pub extras: Option<FbxExtras>,
     /// True when this node hosts an [`AnimationPlayer`] in the spawned scene.
     #[cfg(feature = "animation")]
     pub is_animation_root: bool,

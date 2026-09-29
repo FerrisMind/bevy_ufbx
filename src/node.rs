@@ -72,6 +72,9 @@ pub fn process_nodes_and_skins(
             skin,
             transform: convert_transform(&ufbx_node.local_transform),
             visible: ufbx_node.visible,
+            // Same source of truth as `FbxSkin::extras` / the spawned scene's
+            // `FbxExtras` component (see `scene.rs`).
+            extras: props_to_extras(&ufbx_node.element.props),
             #[cfg(feature = "animation")]
             is_animation_root: anim_roots.contains(&node_typed_id(ufbx_node)),
         };
@@ -233,11 +236,7 @@ pub fn process_skins(
             SkinnedMeshInverseBindposes::from(inverse_bind_matrices),
         );
 
-        let skin_name = if node.element.name.is_empty() {
-            format!("Skin_{skin_index}")
-        } else {
-            format!("{}_Skin", node.element.name)
-        };
+        let (skin_name, authored) = skin_display_name(&node.element.name, skin_index);
 
         let extras = props_to_extras(&skin_deformer.element.props);
         let fbx_skin = FbxSkin {
@@ -256,7 +255,11 @@ pub fn process_skins(
 
         skin_handles_by_mesh_element.insert(node.element.element_id, handle.clone());
         skins.push(handle.clone());
-        if !skin_name.starts_with("Skin_") {
+        // Only authored names go into `named_skins`; the generated `Skin_{i}`
+        // fallback must not be addressable. Authored names always register,
+        // even when they start with `Skin_` (the old `starts_with` guard
+        // dropped e.g. `Skin_Arm_Skin`).
+        if authored {
             named_skins.insert(Box::from(skin_name.as_str()), handle);
         }
         skin_index += 1;
@@ -268,4 +271,51 @@ pub fn process_skins(
         skin_data_by_mesh_element,
         skin_handles_by_mesh_element,
     ))
+}
+
+/// Skin display name for a mesh node, plus whether it derives from the
+/// authored node name (and is therefore registered in
+/// [`ProcessedNodes::named_skins`]).
+///
+/// Unnamed nodes get the generated `Skin_{index}` fallback (`false`); named
+/// nodes get `{name}_Skin` (`true`) — see the registration call site for why
+/// the distinction is an explicit flag rather than a name-prefix check.
+fn skin_display_name(node_name: &str, skin_index: usize) -> (String, bool) {
+    if node_name.is_empty() {
+        (format!("Skin_{skin_index}"), false)
+    } else {
+        (format!("{node_name}_Skin"), true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::skin_display_name;
+
+    #[test]
+    fn unnamed_node_gets_generated_skin_name_flagged_unauthored() {
+        assert_eq!(skin_display_name("", 3), ("Skin_3".to_string(), false));
+    }
+
+    #[test]
+    fn named_node_gets_authored_skin_name() {
+        assert_eq!(
+            skin_display_name("Mesh", 0),
+            ("Mesh_Skin".to_string(), true)
+        );
+    }
+
+    #[test]
+    fn authored_names_starting_with_skin_prefix_stay_registered() {
+        // Regression: the old `!skin_name.starts_with("Skin_")` guard dropped
+        // these legitimate authored names from `named_skins`.
+        assert_eq!(
+            skin_display_name("Skin", 0),
+            ("Skin_Skin".to_string(), true)
+        );
+        assert_eq!(
+            skin_display_name("Skin_Arm", 7),
+            ("Skin_Arm_Skin".to_string(), true)
+        );
+    }
 }

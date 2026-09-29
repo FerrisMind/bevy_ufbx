@@ -151,6 +151,31 @@ fn test_fbx_skin_extras_field() {
 }
 
 #[test]
+fn test_fbx_node_extras_field() {
+    let node = FbxNode {
+        index: 0,
+        name: "Node".to_string(),
+        children: Vec::new(),
+        mesh: None,
+        skin: None,
+        transform: Transform::default(),
+        visible: true,
+        extras: Some(FbxExtras {
+            value: "node=1".to_string(),
+        }),
+        #[cfg(feature = "animation")]
+        is_animation_root: false,
+    };
+
+    assert_eq!(node.name, "Node");
+    assert!(node.visible);
+    assert_eq!(
+        node.extras.as_ref().map(|e| e.value.as_str()),
+        Some("node=1")
+    );
+}
+
+#[test]
 fn test_fbx_light_creation() {
     let light = FbxLight {
         name: "TestLight".to_string(),

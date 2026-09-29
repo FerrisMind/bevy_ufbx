@@ -1,7 +1,7 @@
 //! FBX loader implementation for Bevy.
 
 use crate::error::FbxError;
-use crate::material::process_materials;
+use crate::material::process_materials_with_external_bytes;
 use crate::mesh::process_meshes;
 use crate::node::process_nodes_and_skins;
 use crate::scene::build_scene;
@@ -17,6 +17,7 @@ use crate::animation::process_animations;
 
 /// Settings for FBX file loading.
 #[derive(Serialize, Deserialize, Clone)]
+#[serde(default)]
 pub struct FbxLoaderSettings {
     /// How meshes should be loaded and used.
     pub load_meshes: RenderAssetUsages,
@@ -26,7 +27,7 @@ pub struct FbxLoaderSettings {
     pub load_cameras: bool,
     /// Whether to load lights from the FBX file.
     pub load_lights: bool,
-    /// Whether to bake and load animation stacks as [`AnimationClip`]s.
+    /// Whether to bake and load animation stacks as Bevy `AnimationClip`s.
     pub load_animations: bool,
     /// Samples-per-second for `ufbx::bake_anim` resampling and morph-weight sampling.
     ///
@@ -34,7 +35,7 @@ pub struct FbxLoaderSettings {
     /// [`Self::load_animations`] is false.
     pub bake_fps: f32,
     /// When true (and [`Self::load_animations`] is set), append a rest/bind
-    /// [`AnimationClip`] labeled `AnimationRest` / named `"Rest"` with a single
+    /// Bevy `AnimationClip` labeled `AnimationRest` / named `"Rest"` with a single
     /// keyframe at `t = 0` for each animated node's rest local transform (and
     /// morph weights when present). Useful for character workflows (Godot-style).
     pub generate_rest_animation: bool,
@@ -58,7 +59,7 @@ pub struct FbxLoaderSettings {
 
 /// How ufbx applies unit/axis conversion when coordinate conversion is enabled.
 ///
-/// See <https://ufbx.github.io/docs/nodes/#coordinate-spaces>.
+/// See <https://ufbx.github.io/elements/nodes/#coordinate-spaces>.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum FbxSpaceConversion {
     /// Pick strategy from the file exporter (Blender → adjust transforms, else modify geometry).
@@ -152,6 +153,7 @@ impl AssetLoader for FbxLoader {
                 &bytes,
                 ufbx::LoadOpts {
                     ignore_all_content: true,
+                    load_external_files: false,
                     ..Default::default()
                 },
             )
@@ -163,36 +165,71 @@ impl AssetLoader for FbxLoader {
             ufbx::Exporter::BlenderBinary | ufbx::Exporter::BlenderAscii
         );
 
-        let load_opts = if settings.convert_coordinates {
-            let space_conversion = settings.space_conversion.resolve(exporter);
-            ufbx::LoadOpts {
-                target_unit_meters: 1.0,
-                target_axes: ufbx::CoordinateAxes::right_handed_y_up(),
-                target_camera_axes: ufbx::CoordinateAxes::right_handed_y_up(),
-                target_light_axes: ufbx::CoordinateAxes::right_handed_y_up(),
-                space_conversion,
-                geometry_transform_handling: ufbx::GeometryTransformHandling::HelperNodes,
-                inherit_mode_handling: ufbx::InheritModeHandling::Compensate,
-                generate_missing_normals: true,
-                // Blender exporter (Auto also resolves to AdjustTransforms for these files).
-                use_blender_pbr_material: is_blender,
-                ..Default::default()
-            }
-        } else {
-            ufbx::LoadOpts {
-                generate_missing_normals: true,
-                use_blender_pbr_material: is_blender,
-                ..Default::default()
+        let make_load_opts = || {
+            if settings.convert_coordinates {
+                let space_conversion = settings.space_conversion.resolve(exporter);
+                ufbx::LoadOpts {
+                    target_unit_meters: 1.0,
+                    target_axes: ufbx::CoordinateAxes::right_handed_y_up(),
+                    target_camera_axes: ufbx::CoordinateAxes::right_handed_y_up(),
+                    target_light_axes: ufbx::CoordinateAxes::right_handed_y_up(),
+                    space_conversion,
+                    geometry_transform_handling: ufbx::GeometryTransformHandling::HelperNodes,
+                    inherit_mode_handling: ufbx::InheritModeHandling::Compensate,
+                    generate_missing_normals: true,
+                    // External texture files are read through the Bevy asset
+                    // source ([`crate::material::texture`]); ufbx must not open
+                    // files itself (it also governs geometry cache / OBJ mtl
+                    // reads, which this loader does not support).
+                    load_external_files: false,
+                    // Blender exporter (Auto also resolves to AdjustTransforms for these files).
+                    use_blender_pbr_material: is_blender,
+                    ..Default::default()
+                }
+            } else {
+                ufbx::LoadOpts {
+                    generate_missing_normals: true,
+                    load_external_files: false,
+                    use_blender_pbr_material: is_blender,
+                    ..Default::default()
+                }
             }
         };
 
-        let root = ufbx::load_memory(&bytes, load_opts)
+        let root = ufbx::load_memory(&bytes, make_load_opts())
             .map_err(|e| FbxError::UfbxError(format!("{e:?}")))?;
+
+        // External texture bytes must be read before any material packing and
+        // before the ufbx scene is held across an await (`ufbx::Scene` is not
+        // `Send`, so the asset loader future must not keep it alive at an await
+        // point). Requests own their paths; the scene is dropped, the files are
+        // read through the load context, and the scene is parsed again only when
+        // there is something to read.
+        let (root, external_texture_bytes) = {
+            let fbx_dir = crate::material::texture::asset_base_dir(load_context);
+            let requests = crate::material::texture::external_texture_requests(&root, &fbx_dir);
+            if requests.is_empty() {
+                (root, HashMap::new())
+            } else {
+                drop(root);
+                let external_bytes =
+                    crate::material::texture::read_external_texture_bytes(&requests, load_context)
+                        .await;
+                let root = ufbx::load_memory(&bytes, make_load_opts())
+                    .map_err(|e| FbxError::UfbxError(format!("{e:?}")))?;
+                (root, external_bytes)
+            }
+        };
         let scene: &ufbx::Scene = &root;
 
         // Materials before meshes so [`FbxPrimitive`] can store material handles.
         let processed_materials = if !settings.load_materials.is_empty() {
-            process_materials(scene, settings, load_context)?
+            process_materials_with_external_bytes(
+                scene,
+                settings,
+                load_context,
+                &external_texture_bytes,
+            )?
         } else {
             crate::material::ProcessedMaterials {
                 materials: Vec::new(),
@@ -226,11 +263,12 @@ impl AssetLoader for FbxLoader {
             crate::animation::ProcessedAnimations {
                 animations: Vec::new(),
                 named_animations: HashMap::new(),
+                has_curves: false,
             }
         };
 
         #[cfg(feature = "animation")]
-        let has_animations = settings.load_animations && !processed_anims.animations.is_empty();
+        let has_animations = settings.load_animations && processed_anims.has_curves;
         #[cfg(not(feature = "animation"))]
         let has_animations = false;
 
@@ -271,15 +309,7 @@ impl AssetLoader for FbxLoader {
             )
         } else {
             let axes = scene.settings.axes;
-            (
-                FbxAxisSystem {
-                    up: axis_to_vec3(axes.up),
-                    front: axis_to_vec3(axes.front),
-                    // FBX axis triples are typically right-handed; unknown → Right.
-                    handedness: Handedness::Right,
-                },
-                scene.settings.unit_meters as f32,
-            )
+            (axis_system(axes), scene.settings.unit_meters as f32)
         };
 
         let source = if settings.include_source {
@@ -335,5 +365,41 @@ fn axis_to_vec3(axis: ufbx::CoordinateAxis) -> Vec3 {
         ufbx::CoordinateAxis::PositiveZ => Vec3::Z,
         ufbx::CoordinateAxis::NegativeZ => Vec3::NEG_Z,
         ufbx::CoordinateAxis::Unknown => Vec3::Y,
+    }
+}
+
+fn axis_system(axes: ufbx::CoordinateAxes) -> FbxAxisSystem {
+    let right = axis_to_vec3(axes.right);
+    let up = axis_to_vec3(axes.up);
+    let front = axis_to_vec3(axes.front);
+    FbxAxisSystem {
+        up,
+        // ufbx calls the backward axis "front"; expose forward like converted assets.
+        front: -front,
+        handedness: if right.cross(up).dot(front) < 0.0 {
+            Handedness::Left
+        } else {
+            Handedness::Right
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_axis_metadata_matches_forward_and_handedness() {
+        let right = axis_system(ufbx::CoordinateAxes::right_handed_y_up());
+        assert_eq!(right.up, Vec3::Y);
+        assert_eq!(right.front, Vec3::NEG_Z);
+        assert_eq!(right.handedness, Handedness::Right);
+        let left = axis_system(ufbx::CoordinateAxes {
+            right: ufbx::CoordinateAxis::PositiveX,
+            up: ufbx::CoordinateAxis::PositiveY,
+            front: ufbx::CoordinateAxis::NegativeZ,
+        });
+        assert_eq!(left.front, Vec3::Z);
+        assert_eq!(left.handedness, Handedness::Left);
     }
 }

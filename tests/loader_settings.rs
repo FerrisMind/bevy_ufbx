@@ -13,6 +13,8 @@ fn test_loader_settings_default() {
     assert!(settings.load_cameras);
     assert!(settings.load_lights);
     assert!(settings.load_animations);
+    assert_eq!(settings.bake_fps, 30.0);
+    assert!(!settings.generate_rest_animation);
     assert!(!settings.include_source);
     assert!(settings.convert_coordinates);
     assert_eq!(settings.space_conversion, FbxSpaceConversion::Auto);
@@ -33,6 +35,8 @@ fn test_loader_settings_custom() {
         load_cameras: false,
         load_lights: false,
         load_animations: false,
+        bake_fps: 24.0,
+        generate_rest_animation: true,
         include_source: true,
         convert_coordinates: false,
         space_conversion: FbxSpaceConversion::AdjustTransforms,
@@ -42,6 +46,8 @@ fn test_loader_settings_custom() {
     };
 
     assert!(!settings.convert_coordinates);
+    assert_eq!(settings.bake_fps, 24.0);
+    assert!(settings.generate_rest_animation);
     assert_eq!(
         settings.space_conversion,
         FbxSpaceConversion::AdjustTransforms
@@ -62,6 +68,8 @@ fn test_loader_settings_serialization() {
         load_cameras: false,
         load_lights: true,
         load_animations: true,
+        bake_fps: 60.0,
+        generate_rest_animation: true,
         include_source: false,
         convert_coordinates: true,
         space_conversion: FbxSpaceConversion::TransformRoot,
@@ -75,6 +83,11 @@ fn test_loader_settings_serialization() {
         serde_json::from_str(&serialized).expect("Failed to deserialize");
 
     assert_eq!(deserialized.space_conversion, original.space_conversion);
+    assert_eq!(deserialized.bake_fps, original.bake_fps);
+    assert_eq!(
+        deserialized.generate_rest_animation,
+        original.generate_rest_animation
+    );
     assert_eq!(
         deserialized.skinned_mesh_bounds_policy,
         original.skinned_mesh_bounds_policy

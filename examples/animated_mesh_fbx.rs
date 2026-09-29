@@ -7,6 +7,9 @@
 //! Asset: `assets/cube_anim.fbx` (ufbx test fixture with a transform take).
 //! The loader exposes clips; this example builds the graph and starts playback
 //! (no loader auto-play).
+//!
+//! Note: `FbxLoaderSettings::generate_rest_animation` can emit an `AnimationRest`
+//! / `"Rest"` bind-pose clip for character workflows; this demo plays take 0 only.
 
 use std::f32::consts::PI;
 

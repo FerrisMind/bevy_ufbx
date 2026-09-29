@@ -28,6 +28,16 @@ pub struct FbxLoaderSettings {
     pub load_lights: bool,
     /// Whether to bake and load animation stacks as [`AnimationClip`]s.
     pub load_animations: bool,
+    /// Samples-per-second for `ufbx::bake_anim` resampling and morph-weight sampling.
+    ///
+    /// Maps to [`ufbx::BakeOpts::resample_rate`] (ufbx default is 30). Ignored when
+    /// [`Self::load_animations`] is false.
+    pub bake_fps: f32,
+    /// When true (and [`Self::load_animations`] is set), append a rest/bind
+    /// [`AnimationClip`] labeled `AnimationRest` / named `"Rest"` with a single
+    /// keyframe at `t = 0` for each animated node's rest local transform (and
+    /// morph weights when present). Useful for character workflows (Godot-style).
+    pub generate_rest_animation: bool,
     /// Whether to keep raw FBX bytes on the [`Fbx`] asset.
     pub include_source: bool,
     /// When true, remap into Bevy right-handed Y-up metres via ufbx `LoadOpts`.
@@ -100,6 +110,8 @@ impl Default for FbxLoaderSettings {
             load_cameras: true,
             load_lights: true,
             load_animations: true,
+            bake_fps: 30.0,
+            generate_rest_animation: false,
             include_source: false,
             convert_coordinates: true,
             space_conversion: FbxSpaceConversion::Auto,
@@ -204,7 +216,12 @@ impl AssetLoader for FbxLoader {
 
         #[cfg(feature = "animation")]
         let processed_anims = if settings.load_animations {
-            process_animations(scene, load_context)?
+            process_animations(
+                scene,
+                load_context,
+                settings.bake_fps,
+                settings.generate_rest_animation,
+            )?
         } else {
             crate::animation::ProcessedAnimations {
                 animations: Vec::new(),

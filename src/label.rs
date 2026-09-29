@@ -26,6 +26,8 @@ pub enum FbxAssetLabel {
     MaterialInverted(usize),
     /// `Animation{}`: FBX animation as a Bevy [`AnimationClip`](bevy::animation::AnimationClip)
     Animation(usize),
+    /// `AnimationRest`: optional rest/bind pose clip (see [`crate::FbxLoaderSettings::generate_rest_animation`])
+    AnimationRest,
     /// `Node{}`: Individual FBX node in the scene hierarchy
     Node(usize),
     /// `Skin{}`: FBX skin for skeletal animation
@@ -50,6 +52,7 @@ impl core::fmt::Display for FbxAssetLabel {
             FbxAssetLabel::MaterialStandard(index) => write!(f, "Material{index}/Standard"),
             FbxAssetLabel::MaterialInverted(index) => write!(f, "Material{index} (inverted)"),
             FbxAssetLabel::Animation(index) => write!(f, "Animation{index}"),
+            FbxAssetLabel::AnimationRest => f.write_str("AnimationRest"),
             FbxAssetLabel::Node(index) => write!(f, "Node{index}"),
             FbxAssetLabel::Skin(index) => write!(f, "Skin{index}"),
             FbxAssetLabel::InverseBindMatrices(index) => {

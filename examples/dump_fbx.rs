@@ -7,6 +7,7 @@
 //! cargo run --example dump_fbx -- my_model.fbx
 //! ```
 
+use bevy::animation::AnimationClip;
 use bevy::asset::{AssetPlugin, LoadState};
 use bevy::image::Image;
 use bevy::mesh::skinning::SkinnedMeshInverseBindposes;
@@ -24,6 +25,7 @@ fn main() {
         .init_asset::<Mesh>()
         .init_asset::<StandardMaterial>()
         .init_asset::<Image>()
+        .init_asset::<AnimationClip>()
         .init_asset::<WorldAsset>()
         .init_asset::<SkinnedMeshInverseBindposes>()
         .add_plugins(FbxPlugin);

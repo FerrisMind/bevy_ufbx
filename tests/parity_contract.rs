@@ -15,7 +15,13 @@
 //! - skinned-bounds policy metadata (`DynamicSkinnedMeshBounds` / `NoFrustumCulling`);
 //! - `FbxSpaceConversion::TransformRoot` conversion survives into the built scene
 //!   (synthetic-root wrapper) and matches the default world-space result;
-//! - FBX spot cone full-aperture degrees convert to Bevy half-angle radians.
+//! - FBX spot cone full-aperture degrees convert to Bevy half-angle radians;
+//! - the visible scene root carries `FbxSceneName` + `FbxSceneExtras` + `Name`
+//!   and is not hidden, in both `FbxSpaceConversion` modes (C2 marker merge);
+//! - mesh entities carry an explicit `Aabb` with finite, non-negative
+//!   half-extents (C5, `bevy_gltf` `loader/mod.rs:1694-1705` parity);
+//! - primitive entities carry the glTF-parity `"{mesh}.{material}"` `Name`
+//!   produced by `FbxPrimitive::name_for` (H-SCENE).
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -25,6 +31,7 @@ use bevy::animation::{
     AnimatedBy, AnimationClip, AnimationPlayer, AnimationPlugin, AnimationTargetId,
 };
 use bevy::asset::{AssetPlugin, AssetServer, LoadState};
+use bevy::camera::primitives::Aabb;
 use bevy::camera::visibility::{DynamicSkinnedMeshBounds, NoFrustumCulling};
 use bevy::image::Image;
 use bevy::mesh::VertexAttributeValues;
@@ -36,7 +43,8 @@ use bevy::render::render_resource::Face;
 use bevy::time::TimeUpdateStrategy;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot, WorldSerializationPlugin};
 use bevy_ufbx::{
-    Fbx, FbxAssetLabel, FbxLoaderSettings, FbxMaterial, FbxMesh, FbxNode, FbxPlugin, FbxSkin,
+    Fbx, FbxAssetLabel, FbxLoaderSettings, FbxMaterial, FbxMaterialName, FbxMesh, FbxMeshName,
+    FbxNode, FbxPlugin, FbxPrimitive, FbxSceneExtras, FbxSceneName, FbxSkin,
     FbxSkinnedMeshBoundsPolicy, FbxSpaceConversion,
 };
 
@@ -1047,4 +1055,179 @@ fn punctual_lights_carry_fbx_range_and_spot_radius_mirrors_it() {
             "spot {i}: bevy_gltf mirrors the light range onto SpotLight.radius"
         );
     }
+}
+
+// ── scene root: C2 marker merge (glTF `world_root` parity) ──────────────────
+
+/// C2 regression: `FbxSceneName`/`FbxSceneExtras`/`Name` live on the **visible**
+/// scene root (BG `loader/mod.rs:1029-1079`), not on a separate hidden marker
+/// entity, in both space-conversion modes.
+#[test]
+fn scene_root_carries_identity_components_and_is_visible_in_both_conversion_modes() {
+    let path = "maya_cube_7400_binary.fbx";
+
+    for conversion in [FbxSpaceConversion::Auto, FbxSpaceConversion::TransformRoot] {
+        let mut app = headless_app();
+        let (_fbx, scene) = load_scene_with_conversion(&mut app, path, conversion);
+        let world = scene_world(&app, &scene);
+
+        let roots: Vec<Entity> = world
+            .iter_entities()
+            .filter(|e| world.get::<FbxSceneName>(e.id()).is_some())
+            .map(|e| e.id())
+            .collect();
+        assert_eq!(
+            roots.len(),
+            1,
+            "{conversion:?}: exactly one entity must carry FbxSceneName — the old hidden \
+             marker was merged into the visible root, got {}",
+            roots.len()
+        );
+        let root = roots[0];
+
+        let scene_name = world
+            .get::<FbxSceneName>(root)
+            .expect("FbxSceneName")
+            .0
+            .clone();
+        let name = world
+            .get::<Name>(root)
+            .unwrap_or_else(|| panic!("{conversion:?}: scene root must carry Name"));
+        assert_eq!(
+            name.as_str(),
+            scene_name,
+            "{conversion:?}: scene root `Name` must mirror the scene name (bevy_gltf parity: \
+             `Name::new(scene.name() ...)` on the world root)"
+        );
+
+        world
+            .get::<FbxSceneExtras>(root)
+            .unwrap_or_else(|| panic!("{conversion:?}: scene root must carry FbxSceneExtras"));
+
+        let visibility = world
+            .get::<Visibility>(root)
+            .unwrap_or_else(|| panic!("{conversion:?}: scene root must carry Visibility"));
+        assert_ne!(
+            *visibility,
+            Visibility::Hidden,
+            "{conversion:?}: scene root must not be hidden (bevy_gltf spawns the world root \
+             with `Visibility::default()`)"
+        );
+
+        // The root parents the scene hierarchy in both modes (directly, or via the
+        // `FbxSceneRoot` wrapper under TransformRoot).
+        let children = world
+            .get::<Children>(root)
+            .unwrap_or_else(|| panic!("{conversion:?}: scene root must parent the hierarchy"));
+        assert!(
+            !children.is_empty(),
+            "{conversion:?}: scene root must own the top-level scene hierarchy"
+        );
+    }
+}
+
+// ── explicit Aabb (C5) ──────────────────────────────────────────────────────
+
+/// C5: mesh entities carry an explicit `Aabb` computed from the built mesh
+/// bounds (BG `loader/mod.rs:1694-1705`), matching what `bevy_gltf` inserts.
+#[test]
+fn mesh_entities_carry_explicit_aabb_with_finite_non_negative_half_extents() {
+    let mut app = headless_app();
+    let path = "blender_suzanne_multimaterial_7400_binary.fbx";
+    let fbx_handle = load_fbx(&mut app, path);
+    let scene = default_scene(&app, &fbx_handle);
+
+    let world = scene_world(&app, &scene);
+    let mut checked = 0usize;
+    for entity in world.iter_entities() {
+        if world.get::<Mesh3d>(entity.id()).is_none() {
+            continue;
+        }
+        let aabb = world.get::<Aabb>(entity.id()).unwrap_or_else(|| {
+            panic!(
+                "mesh entity {:?} must carry an explicit Aabb (glTF parity)",
+                entity.id()
+            )
+        });
+        assert!(
+            aabb.center.is_finite(),
+            "Aabb center must be finite, got {:?}",
+            aabb.center
+        );
+        assert!(
+            aabb.half_extents.is_finite(),
+            "Aabb half_extents must be finite, got {:?}",
+            aabb.half_extents
+        );
+        assert!(
+            aabb.half_extents.x >= 0.0 && aabb.half_extents.y >= 0.0 && aabb.half_extents.z >= 0.0,
+            "Aabb half_extents must be non-negative, got {:?}",
+            aabb.half_extents
+        );
+        checked += 1;
+    }
+    assert!(
+        checked > 0,
+        "fixture must spawn at least one mesh entity with an Aabb"
+    );
+}
+
+// ── primitive `Name` (H-SCENE) ──────────────────────────────────────────────
+
+/// H-SCENE: primitive entities carry the glTF-parity `Name` built by
+/// `FbxPrimitive::name_for(mesh_name, material_name)` (BG
+/// `gltf_ext/mesh.rs::primitive_name` + `loader/mod.rs:1733`).
+#[test]
+fn primitive_entities_carry_gltf_primitive_name() {
+    let mut app = headless_app();
+    let path = "blender_suzanne_multimaterial_7400_binary.fbx";
+    let fbx_handle = load_fbx(&mut app, path);
+    let scene = default_scene(&app, &fbx_handle);
+
+    let world = scene_world(&app, &scene);
+    let mut checked = 0usize;
+    let mut names = std::collections::HashSet::new();
+    for entity in world.iter_entities() {
+        if world.get::<Mesh3d>(entity.id()).is_none() {
+            continue;
+        }
+        let name = world
+            .get::<Name>(entity.id())
+            .unwrap_or_else(|| panic!("primitive entity {:?} must carry Name", entity.id()));
+
+        let Some(child_of) = world.get::<ChildOf>(entity.id()) else {
+            panic!(
+                "primitive entity {:?} must be parented to its FBX node",
+                entity.id()
+            );
+        };
+        let parent = child_of.0;
+
+        let mesh_name = world
+            .get::<FbxMeshName>(parent)
+            .map(|n| n.0.as_str())
+            .unwrap_or("");
+        let material_name = world
+            .get::<FbxMaterialName>(entity.id())
+            .map(|n| n.0.as_str());
+        let expected = FbxPrimitive::name_for(mesh_name, material_name);
+        assert_eq!(
+            name.as_str(),
+            expected,
+            "primitive Name must equal FbxPrimitive::name_for(mesh, material) — bevy_gltf \
+             backs every primitive entity with `{{mesh}}.{{material}}`"
+        );
+        names.insert(name.as_str().to_string());
+        checked += 1;
+    }
+
+    assert!(
+        checked >= 2,
+        "the multimaterial fixture must spawn at least two primitive entities, got {checked}"
+    );
+    assert!(
+        names.iter().any(|n| n.contains('.')),
+        "the multimaterial fixture must produce at least one '{{mesh}}.{{material}}' primitive \
+         name, got {names:?}"
+    );
 }

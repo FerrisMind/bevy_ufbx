@@ -9,8 +9,15 @@
 //!
 //! Ambient is near-zero and the app DirectionalLight is removed once the FBX
 //! scene is ready so the imported DirectionalLight is the key light.
-//! On `WorldInstanceReady`, the imported `Camera3d` is activated and the
-//! bootstrap framing camera is despawned.
+//!
+//! The loader activates the first camera in scene order itself (`Camera.is_active`,
+//! glTF parity — see `first_camera_in_scene_order_is_active_and_only_it` in
+//! `tests/parity_contract.rs`), so this example only VERIFIES on
+//! `WorldInstanceReady` that exactly one imported camera is active, then
+//! despawns the bootstrap framing camera. The loader also sets light `range`
+//! (FBX-authored attenuation, default 20.0) and mirrors it onto
+//! `SpotLight.radius` — the observer checks that invariant, nothing here
+//! writes either field.
 
 use std::path::Path;
 
@@ -46,7 +53,7 @@ struct LitSubject;
 #[derive(Component)]
 struct FbxLightScene;
 
-/// Bootstrap camera used only until the imported FBX camera is activated.
+/// Bootstrap camera used only until the loader-activated FBX camera takes over.
 #[derive(Component)]
 struct FramingCamera;
 
@@ -68,14 +75,15 @@ fn setup(
         "missing assets/{LIGHTS_CAMERAS} — copy from ufbx/data"
     );
 
-    // Imported DirectionalLight + inactive Camera3d (no meshes in this fixture).
+    // Imported lights + camera (no meshes in this fixture). The loader already
+    // activated the first camera in scene order by the time Scene0 spawns.
     commands
         .spawn((
             FbxLightScene,
             WorldAssetRoot(asset_server.load(FbxAssetLabel::Scene(0).from_asset(LIGHTS_CAMERAS))),
             Transform::IDENTITY,
         ))
-        .observe(activate_fbx_camera_and_key_light);
+        .observe(report_fbx_scene_ready);
 
     // Subject mesh — not from the light fixture (that file has no geometry).
     commands.spawn((
@@ -96,7 +104,7 @@ fn setup(
         Transform::from_xyz(0.0, 0.0, 0.0),
     ));
 
-    // Framing camera until WorldInstanceReady activates the imported one.
+    // Framing camera until the observer confirms the loader-activated FBX camera.
     commands.spawn((
         FramingCamera,
         Camera3d::default(),
@@ -106,7 +114,12 @@ fn setup(
     // Temporary fill only — despawned when FBX light is ready (avoids black flash).
     commands.spawn((
         AppFillLight,
-        Transform::from_rotation(Quat::from_euler(EulerRot::ZYX, 0.0, 0.3, -std::f32::consts::PI / 5.)),
+        Transform::from_rotation(Quat::from_euler(
+            EulerRot::ZYX,
+            0.0,
+            0.3,
+            -std::f32::consts::PI / 5.,
+        )),
         DirectionalLight {
             illuminance: 200.0,
             shadow_maps_enabled: false,
@@ -118,8 +131,8 @@ fn setup(
         StatusText,
         Text::new(
             "lights_cameras_fbx — maya_camera_light_axes_y_up_6100_binary.fbx\n\
-             Waiting for Scene0 — then activate FBX Camera3d, drop app fill light.\n\
-             Fixture has lights+camera only — subject mesh is a Bevy Cuboid.",
+             Waiting for Scene0 — loader activates the FBX camera; observer verifies it\n\
+             and drops the app fill light. Fixture has lights+camera only (probe = Cuboid).",
         ),
         TextFont::from_font_size(17.0),
         TextColor(Color::srgb(0.95, 0.95, 0.9)),
@@ -133,34 +146,60 @@ fn setup(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn activate_fbx_camera_and_key_light(
+fn report_fbx_scene_ready(
     ready: On<WorldInstanceReady>,
     children: Query<&Children>,
-    mut cameras: Query<&mut Camera>,
+    cameras: Query<&Camera>,
+    dir_lights: Query<&DirectionalLight>,
+    point_lights: Query<&PointLight>,
+    spot_lights: Query<&SpotLight>,
     framing: Query<Entity, With<FramingCamera>>,
     fill: Query<Entity, With<AppFillLight>>,
-    lights: Query<&DirectionalLight>,
     mut commands: Commands,
     mut texts: Query<&mut Text, With<StatusText>>,
 ) {
     let mut dir = 0usize;
+    let mut pts = 0usize;
+    let mut spots = 0usize;
     let mut cams = 0usize;
-    let mut activated = false;
+    let mut active = 0usize;
+    let mut bad_spot_radius = 0usize;
 
     for child in children.iter_descendants(ready.entity) {
-        if lights.get(child).is_ok() {
+        if dir_lights.get(child).is_ok() {
             dir += 1;
         }
-        if let Ok(mut cam) = cameras.get_mut(child) {
+        if point_lights.get(child).is_ok() {
+            pts += 1;
+        }
+        if let Ok(spot) = spot_lights.get(child) {
+            spots += 1;
+            // Loader contract: `SpotLight.radius` mirrors the light `range`
+            // (FBX-authored attenuation, default 20.0 when unauthored).
+            if (spot.radius - spot.range).abs() > f32::EPSILON {
+                bad_spot_radius += 1;
+            }
+        }
+        if let Ok(cam) = cameras.get(child) {
             cams += 1;
-            if !activated {
-                cam.is_active = true;
-                activated = true;
+            if cam.is_active {
+                active += 1;
             }
         }
     }
 
-    if activated {
+    // The loader activates the first camera in scene order (glTF parity) — the
+    // example never writes `is_active`, it only demonstrates the invariant.
+    assert!(
+        cams == 0 || active == 1,
+        "loader must activate exactly one imported camera (active={active} of {cams})"
+    );
+    assert_eq!(
+        bad_spot_radius, 0,
+        "loader must keep SpotLight.radius == range for every spot light"
+    );
+
+    if active == 1 {
         for entity in &framing {
             commands.entity(entity).despawn();
         }
@@ -174,14 +213,16 @@ fn activate_fbx_camera_and_key_light(
     if let Ok(mut text) = texts.single_mut() {
         *text = Text::new(format!(
             "lights_cameras_fbx — {LIGHTS_CAMERAS}\n\
-             FBX: {dir} DirectionalLight(s), {cams} Camera(s); imported camera active={activated}.\n\
+             FBX: {dir} Directional, {pts} Point, {spots} Spot (radius == range), \
+             {cams} Camera(s); loader-activated active={active}/1.\n\
              App fill light removed — FBX light is the key illuminant.\n\
              Probe Cuboid remains (fixture has no mesh)."
         ));
     }
 
     info!(
-        "FBX scene ready: {dir} DirectionalLight(s), {cams} Camera(s); camera_active={activated}"
+        "FBX scene ready: {dir} DirectionalLight(s), {pts} PointLight(s), {spots} SpotLight(s), \
+         {cams} Camera(s); loader-activated active={active}"
     );
 }
 

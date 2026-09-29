@@ -2,8 +2,10 @@
 
 use crate::error::FbxError;
 use crate::label::FbxAssetLabel;
-use crate::mesh::MAX_JOINTS;
-use crate::names::{animation_root_typed_ids, node_display_name, node_typed_id};
+use crate::mesh::{MAX_JOINTS, cluster_is_valid, compact_cluster_slots};
+use crate::names::node_display_name;
+#[cfg(feature = "animation")]
+use crate::names::{animation_root_typed_ids, node_typed_id};
 use crate::types::{FbxMesh, FbxNode, FbxSkin};
 use crate::utils::{convert_matrix, convert_transform, props_to_extras};
 use bevy::asset::{Handle, LoadContext};
@@ -32,16 +34,9 @@ pub fn process_nodes_and_skins(
     let mut named_nodes = HashMap::new();
     let mut node_map: HashMap<u32, Handle<FbxNode>> = HashMap::new();
 
-    let anim_roots: std::collections::HashSet<u32> = {
-        #[cfg(feature = "animation")]
-        {
-            animation_root_typed_ids(scene).into_iter().collect()
-        }
-        #[cfg(not(feature = "animation"))]
-        {
-            std::collections::HashSet::new()
-        }
-    };
+    #[cfg(feature = "animation")]
+    let anim_roots: std::collections::HashSet<u32> =
+        animation_root_typed_ids(scene).into_iter().collect();
 
     // First pass: reserve labeled handles so children/joints can reference them
     // before the [`FbxNode`] assets are materialized (bevy_gltf pattern).
@@ -147,49 +142,89 @@ pub fn process_skins(
             );
         }
 
-        let mut inverse_bind_matrices = Vec::new();
-        let mut joint_handles = Vec::new();
-        let mut joint_element_ids = Vec::new();
+        // Shared with `mesh::process_skinning_data`: the same predicate and cap
+        // produce the joint slot for every cluster, so `JOINT_INDEX` values on the
+        // mesh always point at the matching IBM row here.
+        let cluster_slots = compact_cluster_slots(
+            skin_deformer.clusters.len(),
+            |index| cluster_is_valid(&skin_deformer.clusters[index]),
+            MAX_JOINTS,
+        );
+        let total_clusters = skin_deformer.clusters.len();
+        let total_valid = skin_deformer
+            .clusters
+            .iter()
+            .filter(|cluster| cluster_is_valid(cluster))
+            .count();
+        let joint_count = total_valid.min(MAX_JOINTS);
 
-        let cluster_count = skin_deformer.clusters.len();
-        if cluster_count > MAX_JOINTS {
+        // D5: never fail the whole file for one bad cluster — warn and skip.
+        if total_clusters > total_valid {
             warn!(
-                "FBX skin on '{}' has {cluster_count} joints (Bevy max {MAX_JOINTS}); truncating IBM and joints together",
+                "FBX skin on '{}' has {} unusable joint cluster(s) (missing bone or non-finite inverse bind matrix); skipping them",
+                node.element.name,
+                total_clusters - total_valid
+            );
+        }
+        if total_valid > MAX_JOINTS {
+            warn!(
+                "FBX skin on '{}' has {total_valid} usable joints (Bevy max {MAX_JOINTS}); truncating IBM and joints together",
                 node.element.name
             );
         }
-
-        for cluster in skin_deformer.clusters.iter().take(MAX_JOINTS) {
-            let bone_inverse = convert_matrix(&cluster.bind_to_world).inverse();
-            let geometry_to_world = convert_matrix(&cluster.geometry_to_world);
-            let ibm = bone_inverse * geometry_to_world;
-            if !ibm.is_finite() {
-                return Err(FbxError::ConversionError(format!(
-                    "Non-finite inverse bind matrix on skin for node '{}'",
-                    node.element.name
-                )));
-            }
-            inverse_bind_matrices.push(ibm);
-
-            if let Some(bone_node) = cluster.bone_node.as_ref() {
-                joint_element_ids.push(bone_node.element.element_id);
-                if let Some(joint_handle) = node_map.get(&bone_node.element.element_id) {
-                    joint_handles.push(joint_handle.clone());
-                } else {
-                    return Err(FbxError::ConversionError(format!(
-                        "Missing joint node asset for skin on '{}'",
-                        node.element.name
-                    )));
-                }
-            } else {
-                return Err(FbxError::ConversionError(format!(
-                    "Skin cluster without bone on node '{}'",
-                    node.element.name
-                )));
-            }
+        if joint_count == 0 {
+            warn!(
+                "FBX skin on '{}' has no usable joint clusters; mesh will be imported unskinned",
+                node.element.name
+            );
+            continue;
         }
 
-        if inverse_bind_matrices.is_empty() {
+        let mut inverse_bind_matrices = Vec::with_capacity(joint_count);
+        let mut joint_handles = Vec::with_capacity(joint_count);
+        let mut joint_element_ids = Vec::with_capacity(joint_count);
+        let mut unresolved_joint = false;
+
+        for (cluster_index, cluster) in skin_deformer.clusters.iter().enumerate() {
+            if cluster_slots[cluster_index].is_none() {
+                continue;
+            }
+
+            // Canonical inverse bind matrix. ufbx documents `geometry_to_bone` as the
+            // binding matrix from mesh (geometry) vertices to the bone — the inverse
+            // bind matrix — and computes `geometry_to_world = bone_node.node_to_world *
+            // geometry_to_bone` (`ufbx.c`, `ufbxi_update_skin_cluster`). The previous
+            // `bind_to_world⁻¹ * geometry_to_world` form therefore carried a stray
+            // `bind⁻¹ * bone_load` factor whenever the file's load pose differs from its
+            // bind pose (measured on the corpus; up to 2.97 relative error), and produced
+            // non-finite matrices — failing the whole load — for singular bind poses.
+            let ibm = convert_matrix(&cluster.geometry_to_bone);
+            debug_assert!(
+                ibm.is_finite(),
+                "cluster_is_valid must reject non-finite inverse bind matrices"
+            );
+
+            let Some(bone_node) = cluster.bone_node.as_ref() else {
+                continue;
+            };
+            let Some(joint_handle) = node_map.get(&bone_node.element.element_id) else {
+                // `node_map` covers every node in `scene.nodes`, so a valid `bone_node`
+                // ref always resolves; if one ever does not, drop the whole skin rather
+                // than emit a joints/IBM list that no longer matches mesh influence slots.
+                unresolved_joint = true;
+                break;
+            };
+
+            inverse_bind_matrices.push(ibm);
+            joint_element_ids.push(bone_node.element.element_id);
+            joint_handles.push(joint_handle.clone());
+        }
+
+        if unresolved_joint || joint_handles.len() != joint_count {
+            warn!(
+                "FBX skin on '{}' references a joint node without an asset handle; skipping skin",
+                node.element.name
+            );
             continue;
         }
 

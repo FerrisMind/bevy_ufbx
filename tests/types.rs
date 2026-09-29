@@ -107,6 +107,7 @@ fn test_fbx_primitive_creation() {
     let prim = FbxPrimitive {
         mesh: Handle::default(),
         material: Some(Handle::default()),
+        name: None,
         extras: Some(FbxExtras {
             value: "k=v".to_string(),
         }),
@@ -120,6 +121,7 @@ fn test_fbx_primitive_creation() {
 
     assert_eq!(mesh.primitives.len(), 1);
     assert!(mesh.primitives[0].material.is_some());
+    assert!(mesh.primitives[0].name.is_none());
     assert_eq!(
         mesh.primitives[0].extras.as_ref().map(|e| e.value.as_str()),
         Some("k=v")

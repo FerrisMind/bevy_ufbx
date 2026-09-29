@@ -153,7 +153,30 @@ pub struct FbxCamera {
 pub struct FbxPrimitive {
     pub mesh: Handle<Mesh>,
     pub material: Option<Handle<StandardMaterial>>,
+    /// glTF-parity primitive name in the `"{mesh}.{material}"` form (see
+    /// [`FbxPrimitive::name_for`]); `None` when the loader did not name the
+    /// primitive. Also used as the `Name` component of the primitive entity in
+    /// the spawned scene.
+    pub name: Option<String>,
     pub extras: Option<FbxExtras>,
+}
+
+impl FbxPrimitive {
+    /// Builds the glTF-parity primitive name: `"{mesh}.{material}"`, falling
+    /// back to the mesh name when the primitive has no material (or the
+    /// material is unnamed). Mirrors `bevy_gltf`'s `primitive_name`
+    /// (`loader/gltf_ext/mesh.rs`), which backs the `Name` component of the
+    /// primitive entity.
+    ///
+    /// Empty FBX names count as unnamed: an empty `mesh_name` falls back to
+    /// `"Mesh"` and an empty material name to no material.
+    pub fn name_for(mesh_name: &str, material_name: Option<&str>) -> String {
+        let mesh_name = if mesh_name.is_empty() { "Mesh" } else { mesh_name };
+        match material_name.filter(|name| !name.is_empty()) {
+            Some(material_name) => format!("{mesh_name}.{material_name}"),
+            None => mesh_name.to_string(),
+        }
+    }
 }
 
 /// FBX mesh container (glTF-style): one or more Bevy [`Mesh`] primitives.
@@ -302,4 +325,26 @@ pub struct Fbx {
     pub metadata: FbxMeta,
     /// Raw FBX bytes when [`crate::FbxLoaderSettings::include_source`] is set.
     pub source: Option<Vec<u8>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn primitive_name_joins_mesh_and_material() {
+        assert_eq!(FbxPrimitive::name_for("Cube", Some("Wood")), "Cube.Wood");
+    }
+
+    #[test]
+    fn primitive_name_without_material_falls_back_to_mesh() {
+        assert_eq!(FbxPrimitive::name_for("Cube", None), "Cube");
+        assert_eq!(FbxPrimitive::name_for("Cube", Some("")), "Cube");
+    }
+
+    #[test]
+    fn primitive_name_unnamed_mesh_falls_back_to_mesh() {
+        assert_eq!(FbxPrimitive::name_for("", Some("Wood")), "Mesh.Wood");
+        assert_eq!(FbxPrimitive::name_for("", None), "Mesh");
+    }
 }

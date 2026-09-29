@@ -526,6 +526,10 @@ fn append_mesh_primitives(
         fbx_primitives.push(FbxPrimitive {
             mesh: mesh_handle.clone(),
             material,
+            // Mechanical unblock (L-PLUGIN D7): populate via
+            // `FbxPrimitive::name_for(mesh_name, material_name)` once the mesh
+            // name is available here; see .swarm/results/wave1-plugin.md.
+            name: None,
             extras: mesh_extras.clone(),
         });
         primitive_meshes.push(mesh_handle);

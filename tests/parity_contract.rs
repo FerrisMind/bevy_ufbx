@@ -981,3 +981,70 @@ fn spot_cone_angles_are_converted_from_fbx_full_aperture_degrees() {
         );
     }
 }
+
+#[test]
+fn first_camera_in_scene_order_is_active_and_only_it() {
+    let mut app = headless_app();
+    let path = "maya_camera_light_axes_y_up_6100_binary.fbx";
+    let fbx_handle = load_fbx(&mut app, path);
+    let scene = default_scene(&app, &fbx_handle);
+
+    let world = scene_world(&app, &scene);
+    let active: Vec<bool> = world
+        .iter_entities()
+        .filter_map(|e| world.get::<Camera>(e.id()).map(|c| c.is_active))
+        .collect();
+
+    assert!(
+        !active.is_empty(),
+        "fixture carries at least one camera node"
+    );
+    assert_eq!(
+        active.iter().filter(|is_active| **is_active).count(),
+        1,
+        "bevy_gltf activates exactly one camera per spawned scene (the first node in \
+         scene order, `is_active: !*active_camera_found`); the FBX loader must match"
+    );
+}
+
+#[test]
+fn punctual_lights_carry_fbx_range_and_spot_radius_mirrors_it() {
+    let mut app = headless_app();
+    let path = "motionbuilder_lights_7700_ascii.fbx";
+    let fbx_handle = load_fbx(&mut app, path);
+    let scene = default_scene(&app, &fbx_handle);
+
+    let world = scene_world(&app, &scene);
+    let mut points = Vec::new();
+    let mut spots = Vec::new();
+    for entity in world.iter_entities() {
+        if let Some(point) = world.get::<PointLight>(entity.id()) {
+            points.push(point.clone());
+        }
+        if let Some(spot) = world.get::<SpotLight>(entity.id()) {
+            spots.push(spot.clone());
+        }
+    }
+    assert_eq!(points.len(), 4, "fixture contains 4 point lights");
+    assert_eq!(spots.len(), 5, "fixture contains 5 spot lights");
+
+    // The fixture authors no attenuation end, so the punctual-light default
+    // must apply instead of infinity.
+    for (i, point) in points.iter().enumerate() {
+        assert_eq!(
+            point.range, 20.0,
+            "point {i}: unattenuated lights default to the KHR_lights_punctual \
+             range used by bevy_gltf"
+        );
+    }
+    for (i, spot) in spots.iter().enumerate() {
+        assert_eq!(
+            spot.range, 20.0,
+            "spot {i}: unattenuated lights default to the KHR_lights_punctual range"
+        );
+        assert_eq!(
+            spot.radius, spot.range,
+            "spot {i}: bevy_gltf mirrors the light range onto SpotLight.radius"
+        );
+    }
+}

@@ -350,6 +350,10 @@ pub fn build_scene(
         }
     }
 
+    // glTF parity: exactly one camera per spawned scene is activated (the first
+    // one encountered in scene order), matching `bevy_gltf`'s
+    // `is_active: !*active_camera_found`.
+    let mut active_camera_found = false;
     for u_node in scene.nodes.as_ref().iter() {
         if u_node.is_root {
             continue;
@@ -367,7 +371,12 @@ pub fn build_scene(
         if settings.load_cameras
             && let Some(camera_ref) = u_node.camera.as_ref()
         {
-            insert_camera(world.entity_mut(entity), camera_ref.as_ref());
+            // glTF parity: the first camera node encountered becomes the active
+            // camera, so a spawned scene renders out of the box instead of
+            // leaving every camera inactive until the user picks one.
+            let is_active = !active_camera_found;
+            active_camera_found = true;
+            insert_camera(world.entity_mut(entity), camera_ref.as_ref(), is_active);
         }
     }
 
@@ -494,12 +503,48 @@ fn bevy_spot_cone_angles(inner_degrees: f32, outer_degrees: f32) -> (f32, f32) {
     (inner, outer)
 }
 
+/// FBX attenuation end distance used as Bevy's light `range`.
+///
+/// ufbx has no typed field for it, but the raw DCC property survives on
+/// `ufbx_light.props`. Returns `None` when the file does not author a usable
+/// positive distance, in which case the caller falls back to glTF's default.
+fn fbx_light_range(light: &ufbx::Light) -> Option<f32> {
+    const NAMES: &[&str] = &[
+        "FarAttenuationEnd",
+        "Far Attenuation End",
+        "AttenuationEnd",
+        "DecayStart",
+    ];
+    for prop in light.element.props.props.as_ref().iter() {
+        if !NAMES
+            .iter()
+            .any(|name| prop.name.eq_ignore_ascii_case(name))
+        {
+            continue;
+        }
+        let value = prop.value_vec4.x as f32;
+        if value.is_finite() && value > 0.0 {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// Bevy's default light `range`, matching `bevy_gltf`'s punctual-light default.
+/// FBX files without authored attenuation land here rather than at infinity.
+const DEFAULT_LIGHT_RANGE: f32 = 20.0;
+
 fn insert_light(mut entity: EntityWorldMut, light: &ufbx::Light) {
     let color = Color::srgb(
         light.color.x as f32,
         light.color.y as f32,
         light.color.z as f32,
     );
+    // FBX `Intensity` is a DCC-relative factor, not a physical unit. glTF's
+    // KHR_lights_punctual is defined in lux / candela, so these multipliers are
+    // a documented convention (directional ×10000, point/spot ×1000) chosen to
+    // preserve existing visuals — not a lux/candela equivalence.
+    let range = fbx_light_range(light).unwrap_or(DEFAULT_LIGHT_RANGE);
     match light.type_ {
         ufbx::LightType::Directional => {
             entity.insert(DirectionalLight {
@@ -513,6 +558,7 @@ fn insert_light(mut entity: EntityWorldMut, light: &ufbx::Light) {
             entity.insert(PointLight {
                 color,
                 intensity: light.intensity as f32 * 1000.0,
+                range,
                 shadow_maps_enabled: light.cast_shadows,
                 ..Default::default()
             });
@@ -523,6 +569,9 @@ fn insert_light(mut entity: EntityWorldMut, light: &ufbx::Light) {
             entity.insert(SpotLight {
                 color,
                 intensity: light.intensity as f32 * 1000.0,
+                range,
+                // `bevy_gltf` mirrors the light's range onto the spot radius.
+                radius: range,
                 shadow_maps_enabled: light.cast_shadows,
                 inner_angle,
                 outer_angle,
@@ -534,6 +583,7 @@ fn insert_light(mut entity: EntityWorldMut, light: &ufbx::Light) {
             entity.insert(PointLight {
                 color,
                 intensity: light.intensity as f32 * 1000.0,
+                range,
                 shadow_maps_enabled: light.cast_shadows,
                 ..Default::default()
             });
@@ -544,7 +594,7 @@ fn insert_light(mut entity: EntityWorldMut, light: &ufbx::Light) {
     }
 }
 
-fn insert_camera(mut entity: EntityWorldMut, camera: &ufbx::Camera) {
+fn insert_camera(mut entity: EntityWorldMut, camera: &ufbx::Camera, is_active: bool) {
     let fov_y = camera.field_of_view_deg.y as f32;
     let projection = match camera.projection_mode {
         ufbx::ProjectionMode::Orthographic => {
@@ -578,7 +628,7 @@ fn insert_camera(mut entity: EntityWorldMut, camera: &ufbx::Camera) {
         Camera3d::default(),
         projection,
         Camera {
-            is_active: false,
+            is_active,
             ..Default::default()
         },
     ));

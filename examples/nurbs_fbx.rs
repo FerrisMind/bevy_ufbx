@@ -116,8 +116,13 @@ fn setup(
     // `report_labels` verifies that on screen.
     commands.insert_resource(LabelReport {
         mesh: asset_server.load(FbxAssetLabel::Mesh(0).from_asset(FBX_PATH)),
-        primitive: asset_server
-            .load(FbxAssetLabel::Primitive { mesh: 0, primitive: 0 }.from_asset(FBX_PATH)),
+        primitive: asset_server.load(
+            FbxAssetLabel::Primitive {
+                mesh: 0,
+                primitive: 0,
+            }
+            .from_asset(FBX_PATH),
+        ),
         reported: false,
     });
 
@@ -363,8 +368,7 @@ fn report_labels(
              Look for: smooth SADDLE — tessellated triangles, NOT editable NURBS.\n\
              Mesh0 '{}' -> Primitive0 '{}' ({verts} verts, ufbx 16x16 span tessellation)\n\
              Scene0 Mesh3d handles include Mesh0/Primitive0 [OK] | demo scale = {DEMO_VISUAL_SCALE}.",
-            fbx_mesh.name,
-            prim_name,
+            fbx_mesh.name, prim_name,
         ));
     }
     report.reported = true;

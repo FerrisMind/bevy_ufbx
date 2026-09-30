@@ -120,9 +120,9 @@ fn setup_mesh_and_animation(
     mut graphs: ResMut<Assets<AnimationGraph>>,
 ) {
     let (fbx_path, scale, anim_index) = pick_fbx();
-    let (graph, index) = AnimationGraph::from_clip(asset_server.load(
-        FbxAssetLabel::Animation(anim_index).from_asset(fbx_path),
-    ));
+    let (graph, index) = AnimationGraph::from_clip(
+        asset_server.load(FbxAssetLabel::Animation(anim_index).from_asset(fbx_path)),
+    );
     let graph_handle = graphs.add(graph);
 
     commands.insert_resource(DemoHandles {
@@ -351,8 +351,7 @@ fn frame_camera_when_ready(
 
     println!(
         "[skinned_mesh_fbx] content bounds: {} mesh AABB(s), union sampled over {} frames",
-        framing.meshes,
-        framing.frames
+        framing.meshes, framing.frames
     );
     println!(
         "[skinned_mesh_fbx]   world min=({:.4}, {:.4}, {:.4}) max=({:.4}, {:.4}, {:.4}) \

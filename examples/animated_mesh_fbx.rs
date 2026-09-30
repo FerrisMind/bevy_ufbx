@@ -312,8 +312,7 @@ fn frame_camera_when_ready(
 
     println!(
         "[animated_mesh_fbx] content bounds: {} mesh AABB(s), union sampled over {} frames",
-        framing.meshes,
-        framing.frames
+        framing.meshes, framing.frames
     );
     println!(
         "[animated_mesh_fbx]   world min=({:.4}, {:.4}, {:.4}) max=({:.4}, {:.4}, {:.4}) \

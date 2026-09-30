@@ -335,8 +335,7 @@ fn frame_camera_when_ready(
 
     println!(
         "[morph_fbx] content bounds: {} mesh AABB(s), union sampled over {} frames",
-        framing.meshes,
-        framing.frames
+        framing.meshes, framing.frames
     );
     println!(
         "[morph_fbx]   world min=({:.4}, {:.4}, {:.4}) max=({:.4}, {:.4}, {:.4}) \
@@ -445,11 +444,7 @@ fn update_status(
     // Live weights + player count.
     let mut weights_line = "morph weights: (none yet)".to_string();
     for mw in &morphs {
-        let weights: Vec<String> = mw
-            .weights()
-            .iter()
-            .map(|w| format!("{w:.3}"))
-            .collect();
+        let weights: Vec<String> = mw.weights().iter().map(|w| format!("{w:.3}")).collect();
         weights_line = format!("morph weights: [{}]", weights.join(", "));
         break;
     }

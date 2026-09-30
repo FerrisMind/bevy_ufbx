@@ -140,8 +140,13 @@ fn setup(
         scale,
         fbx: asset_server.load(fbx_path),
         mesh: asset_server.load(FbxAssetLabel::Mesh(0).from_asset(fbx_path)),
-        primitive: asset_server
-            .load(FbxAssetLabel::Primitive { mesh: 0, primitive: 0 }.from_asset(fbx_path)),
+        primitive: asset_server.load(
+            FbxAssetLabel::Primitive {
+                mesh: 0,
+                primitive: 0,
+            }
+            .from_asset(fbx_path),
+        ),
         reported: false,
     });
 
@@ -379,9 +384,8 @@ fn report_labels(
         report.reported = true;
         eprintln!("[static_mesh_fbx] label load FAILED (index {failed}): {failed:?}");
         if let Ok(mut text) = texts.single_mut() {
-            *text = Text::new(
-                "static_mesh_fbx — label resolution FAILED\n(see stderr for details)",
-            );
+            *text =
+                Text::new("static_mesh_fbx — label resolution FAILED\n(see stderr for details)");
         }
         return;
     }

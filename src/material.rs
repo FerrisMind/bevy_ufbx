@@ -997,12 +997,14 @@ mod tests {
     }
 
     #[test]
-    fn v_flip_compensation_maps_flipped_uvs_to_the_authored_sample() {
+    fn v_flip_compensation_conjugates_the_authored_transform() {
         let transform =
             Affine2::from_scale_angle_translation(Vec2::new(2.0, 3.0), 0.4, Vec2::new(0.2, 0.7));
         let compensated = compensate_v_flip(transform);
         let flip =
             Affine2::from_scale_angle_translation(Vec2::new(1.0, -1.0), 0.0, Vec2::new(0.0, 1.0));
+        // FBX UVs are V-up, Bevy UVs V-down: with mesh UVs stored as `F(uv)`,
+        // the shader must sample `F(T(uv))`, so `M = F ∘ T ∘ F`.
         for uv in [
             Vec2::new(0.0, 0.0),
             Vec2::new(1.0, 0.0),
@@ -1011,13 +1013,19 @@ mod tests {
             Vec2::new(0.9, 0.1),
         ] {
             let flipped = flip.transform_point2(uv);
-            let expected = transform.transform_point2(uv);
+            let expected = flip.transform_point2(transform.transform_point2(uv));
             let actual = compensated.transform_point2(flipped);
             assert!(
                 (actual - expected).length() < 1e-5,
                 "uv {uv:?}: expected {expected:?}, got {actual:?}"
             );
         }
+        // With no authored transform the mesh flip alone maps FBX -> Bevy, so
+        // the shader transform must be exactly the identity.
+        let identity = compensate_v_flip(Affine2::IDENTITY);
+        assert_eq!(identity.matrix2.x_axis, Vec2::X, "identity x_axis");
+        assert_eq!(identity.matrix2.y_axis, Vec2::Y, "identity y_axis");
+        assert_eq!(identity.translation, Vec2::ZERO, "identity translation");
     }
 
     /// Numbered DCC names are 1-based, so `UVChannel_1`/`map1` are the first set.

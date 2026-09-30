@@ -882,21 +882,34 @@ fn embedded_any<'a>(
         .or_else(|| embedded_image(decoded, id, ColorSpace::Srgb))
 }
 
-/// Compensate a texture UV transform for the loader's `1 - v` UV flip.
+/// Re-express an authored texture UV transform in the loader's flipped-V UV
+/// space: the conjugation `F ∘ T ∘ F`.
 ///
-/// Mesh UVs are flipped V (see `crate::mesh`), so a transform `T` authored for
-/// the FBX UV space must be applied to the flipped UVs `u = F(uv)` as `T ∘ F`
-/// (`F(u, v) = (u, 1 - v)`): the sampled coordinate must still be `T(uv)`, i.e.
-/// `A(F(uv)) == T(uv)`. For a scale without rotation this flips the V scale and
-/// offsets V by `1 - translation.y * scale.y`, matching FBX2glTF/bevy_mod_fbx.
+/// FBX UVs are V-up (bottom-origin) — ufbx's own reference renderer maps
+/// `uv.y = 0` to the BOTTOM image row (`px = uv * (width, -height)` in
+/// `sample_image`, `libs/ufbx/examples/picort/picort.h`, over row-top-down
+/// storage in `libs/ufbx/examples/picort/picort_png.cpp`). Bevy images are
+/// V-down (top-origin, PNG row 0 first), so `crate::mesh` stores mesh UVs as
+/// `F(u, v) = (u, 1 - v)`: that mesh flip alone is what maps FBX UVs into
+/// Bevy's image space. An authored transform `T` must therefore be
+/// conjugated by the flip, not composed with it — the shader matrix `M` has
+/// to satisfy `M(F(uv)) = F(T(uv))`, i.e. `M = F ∘ T ∘ F`. Bevy's `Affine2`
+/// multiplies column vectors (`(a * b).transform_point2(p) ==
+/// a.transform_point2(b.transform_point2(p))`), so this is literally
+/// `flip * transform * flip`.
+///
+/// Consequences: an identity authored transform yields `Affine2::IDENTITY`
+/// (the mesh flip alone does the FBX→Bevy mapping), and an authored scale
+/// `(sx, sy)` plus translation `(tx, ty)` (no rotation) yields
+/// `x' = sx*x + tx`, `y' = sy*y + (1 - sy - ty)`.
 pub(super) fn compensate_v_flip(transform: Affine2) -> Affine2 {
     let flip =
         Affine2::from_scale_angle_translation(Vec2::new(1.0, -1.0), 0.0, Vec2::new(0.0, 1.0));
-    transform * flip
+    flip * transform * flip
 }
 
-/// The transform the shader applies to one texture: the authored UV transform
-/// composed with the V-flip compensation.
+/// The transform the shader applies to one texture: the authored UV
+/// transform conjugated into the loader's flipped-V UV space.
 pub(super) fn unit_uv_transform(texture: &ufbx::Texture) -> Affine2 {
     compensate_v_flip(convert_texture_uv_transform(texture))
 }

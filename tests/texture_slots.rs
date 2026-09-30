@@ -224,9 +224,11 @@ fn embedded_fixture_packs_opacity_and_metallic_roughness() {
         0,
     );
 
-    // UV slot selection and the 1-v mesh flip compensation. The fixture's mesh
-    // has a single UV set (named `UVChannel_1`), so its ordinal is UV0: the name
-    // is a DCC label, not the mesh's channel order.
+    // UV slot selection. The fixture's mesh has a single UV set (named
+    // `UVChannel_1`), so its ordinal is UV0: the name is a DCC label, not the
+    // mesh's channel order. The fixture authors no texture transform, so after
+    // the F ∘ T ∘ F conjugation the shader transform is the identity — the
+    // mesh's own 1-v flip (FBX V-up -> Bevy V-down) does all the work.
     assert!(matches!(material.base_color_channel, UvChannel::Uv0));
     assert!(matches!(
         material.metallic_roughness_channel,
@@ -235,13 +237,25 @@ fn embedded_fixture_packs_opacity_and_metallic_roughness() {
     assert!(matches!(material.normal_map_channel, UvChannel::Uv0));
     assert_close(
         material.uv_transform.matrix2.y_axis.y,
-        -1.0,
-        "uv flip",
+        1.0,
+        "no authored transform -> identity",
         0,
         0,
     );
-    assert_close(material.uv_transform.translation.y, 1.0, "uv flip", 0, 0);
-    assert_close(material.uv_transform.matrix2.x_axis.x, 1.0, "uv flip", 0, 0);
+    assert_close(
+        material.uv_transform.translation.y,
+        0.0,
+        "no authored transform -> identity",
+        0,
+        0,
+    );
+    assert_close(
+        material.uv_transform.matrix2.x_axis.x,
+        1.0,
+        "no authored transform -> identity",
+        0,
+        0,
+    );
 
     // Dense labels: the emissive map is the sRGB variant of texture 6, the
     // normal map the linear-only variant of texture 8; packed images carry

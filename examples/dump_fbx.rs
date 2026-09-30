@@ -771,9 +771,10 @@ fn print_materials(app: &App, handle: &Handle<Fbx>) {
             "    base_color_texture={}",
             yes_no(mat.base_color_texture.is_some())
         );
-        // ufbx `Texture::uv_transform` (translation/scale/rotation + V-flip
-        // compensation) applied to the base color slot — see section 10 for a
-        // fixture whose FBX texture carries a non-identity `Scaling`.
+        // ufbx `Texture::uv_transform` (translation/scale/rotation) conjugated
+        // into the loader's flipped-V UV space (`F ∘ T ∘ F`), so an identity
+        // authored transform prints the identity — see section 10 for a fixture
+        // whose FBX texture carries a non-identity `Scaling`.
         println!("    uv_transform={:?}", mat.uv_transform);
         println!(
             "    metallic={:.4} perceptual_roughness={:.4} reflectance={:.4}",

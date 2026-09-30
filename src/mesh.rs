@@ -759,7 +759,10 @@ pub fn create_mesh_from_corners(
 
             if ufbx_mesh.vertex_uv.exists {
                 let uv = ufbx_mesh.vertex_uv[corner];
-                // FBX often stores V flipped relative to Bevy/glTF.
+                // FBX UVs are V-up (bottom-origin, as sampled by ufbx's own
+                // reference renderer `picort`: `uv * (width, -height)` over
+                // top-down PNG rows); Bevy images are V-down, so flip V when
+                // crossing into Bevy UV space.
                 uvs.push([uv.x as f32, 1.0 - uv.y as f32]);
             }
 
@@ -767,6 +770,7 @@ pub fn create_mesh_from_corners(
                 && set.vertex_uv.exists
             {
                 let uv = set.vertex_uv[corner];
+                // Same FBX V-up → Bevy V-down flip as UV0.
                 uv1s.push([uv.x as f32, 1.0 - uv.y as f32]);
             }
 

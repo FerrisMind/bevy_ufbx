@@ -18,7 +18,11 @@ use bevy::{
 use bevy_ufbx::{FbxAssetLabel, FbxPlugin};
 
 const FBX_PATH: &str = "zbrush_vertex_color_7500_ascii.fbx";
-/// Fixture verts are ~metre-scale already — no cm demo enlarge.
+/// Fixture is tiny — `dump_fbx` reports `Aabb min=(-0.01, 0, -0.01)`
+/// `max=(0.01, 0.02, 0.01)` (0.02 units at `unit_scale=1`, NOT metre-scale as
+/// this comment used to claim). Kept at 1.0 = the loader's authored size; the
+/// camera below is hard-coded to the fit-to-content framing of those bounds
+/// instead ("camera too far from the model" was the old 4.7-unit distance).
 const DEMO_VISUAL_SCALE: f32 = 1.0;
 
 fn main() {
@@ -66,9 +70,19 @@ fn setup(
         ))
         .observe(emphasize_vertex_colors);
 
+    // Fit-to-content framing for the 0.02-unit fixture: bounds from `dump_fbx`
+    // (center (0, 0.01, 0), radius 0.0173) + the original diagonal viewpoint
+    // direction at distance 0.054 → ~45% screen fill. `near: 0.01` (Bevy
+    // default 0.1) is required — at the default near plane the model sits
+    // inside it and stays invisible; Bevy's reverse-infinite-Z projection
+    // keeps depth precision fine at this near/far ratio.
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(2.8, 2.2, 3.6).looking_at(Vec3::new(0.0, 1.0, 0.0), Vec3::Y),
+        Projection::Perspective(PerspectiveProjection {
+            near: 0.01,
+            ..default()
+        }),
+        Transform::from_xyz(0.032, 0.024, 0.041).looking_at(Vec3::new(0.0, 0.01, 0.0), Vec3::Y),
     ));
 
     commands.spawn((

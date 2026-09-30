@@ -9,7 +9,15 @@
 //!
 //! ```sh
 //! cargo run --example dump_fbx -- my_model.fbx
+//! cargo run --example dump_fbx -- "C:\models\My Idle.fbx"
 //! ```
+//!
+//! The path may be `assets/`-relative or absolute (spaces fine — quote it).
+//! Absolute paths are *unapproved* for bevy_asset and Bevy 0.19's default
+//! `UnapprovedPathMode::Forbid` rejects them before the loader runs, so this
+//! "inspect any file" dev tool opts in app-wide with `UnapprovedPathMode::Allow`
+//! (the Bevy docs discourage `Allow` for apps with scripts/modding — this
+//! example has neither; use `LoadBuilder::override_unapproved()` there).
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -17,7 +25,7 @@ use std::time::Duration;
 use bevy::animation::{
     AnimatedBy, AnimationClip, AnimationPlayer, AnimationPlugin, AnimationTargetId,
 };
-use bevy::asset::{AssetLoadError, AssetPlugin, LoadState};
+use bevy::asset::{AssetLoadError, AssetPlugin, LoadState, UnapprovedPathMode};
 use bevy::camera::primitives::Aabb;
 use bevy::image::Image;
 use bevy::mesh::skinning::SkinnedMeshInverseBindposes;
@@ -41,37 +49,47 @@ fn main() {
         .unwrap_or_else(|| "cube.fbx".to_string());
 
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, AssetPlugin::default()))
-        .init_asset::<Mesh>()
-        .init_asset::<StandardMaterial>()
-        .init_asset::<Image>()
-        .init_asset::<AnimationClip>()
-        .init_asset::<WorldAsset>()
-        .init_asset::<SkinnedMeshInverseBindposes>()
-        .add_plugins(FbxPlugin)
-        // Headless Scene0 spawn support (mirrors tests/parity_contract.rs
-        // `spawnable_app`): reflection registration for every component type
-        // the loader scenes contain, so the world spawner can clone them.
-        .add_plugins(AnimationPlugin)
-        .add_plugins(WorldSerializationPlugin)
-        .register_type::<Transform>()
-        .register_type::<GlobalTransform>()
-        .register_type::<Visibility>()
-        .register_type::<Name>()
-        .register_type::<ChildOf>()
-        .register_type::<Children>()
-        .register_type::<Mesh3d>()
-        .register_type::<MeshMaterial3d<StandardMaterial>>()
-        .register_type::<Aabb>()
-        .register_type::<Camera>()
-        .register_type::<Camera3d>()
-        .register_type::<Projection>()
-        .register_type::<DirectionalLight>()
-        .register_type::<PointLight>()
-        .register_type::<SpotLight>()
-        .register_type::<AnimationPlayer>()
-        .register_type::<AnimationTargetId>()
-        .register_type::<AnimatedBy>();
+    app.add_plugins((
+        MinimalPlugins,
+        AssetPlugin {
+            // "Load any file" dev tool: accept absolute paths. Bevy's default
+            // `UnapprovedPathMode::Forbid` rejects them BEFORE the loader runs
+            // (see `UnapprovedPathMode` docs for the modding-support caveat that
+            // does not apply to this local example).
+            unapproved_path_mode: UnapprovedPathMode::Allow,
+            ..default()
+        },
+    ))
+    .init_asset::<Mesh>()
+    .init_asset::<StandardMaterial>()
+    .init_asset::<Image>()
+    .init_asset::<AnimationClip>()
+    .init_asset::<WorldAsset>()
+    .init_asset::<SkinnedMeshInverseBindposes>()
+    .add_plugins(FbxPlugin)
+    // Headless Scene0 spawn support (mirrors tests/parity_contract.rs
+    // `spawnable_app`): reflection registration for every component type
+    // the loader scenes contain, so the world spawner can clone them.
+    .add_plugins(AnimationPlugin)
+    .add_plugins(WorldSerializationPlugin)
+    .register_type::<Transform>()
+    .register_type::<GlobalTransform>()
+    .register_type::<Visibility>()
+    .register_type::<Name>()
+    .register_type::<ChildOf>()
+    .register_type::<Children>()
+    .register_type::<Mesh3d>()
+    .register_type::<MeshMaterial3d<StandardMaterial>>()
+    .register_type::<Aabb>()
+    .register_type::<Camera>()
+    .register_type::<Camera3d>()
+    .register_type::<Projection>()
+    .register_type::<DirectionalLight>()
+    .register_type::<PointLight>()
+    .register_type::<SpotLight>()
+    .register_type::<AnimationPlayer>()
+    .register_type::<AnimationTargetId>()
+    .register_type::<AnimatedBy>();
 
     let handle: Handle<Fbx> = app.world().resource::<AssetServer>().load(path.clone());
     match wait_for_asset(&mut app, &handle, LOAD_TIMEOUT_FRAMES) {

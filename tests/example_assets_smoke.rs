@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use bevy::animation::AnimationClip;
-use bevy::asset::{AssetPlugin, AssetServer, LoadState};
+use bevy::asset::{AssetPlugin, AssetServer, LoadState, UnapprovedPathMode};
 use bevy::image::{Image, ImageSamplerDescriptor};
 use bevy::mesh::skinning::SkinnedMeshInverseBindposes;
 use bevy::prelude::*;
@@ -428,6 +428,46 @@ fn smoke_sampler_settings_perload_scene_loads() {
     assert!(
         count >= 1,
         "{path}: expected ≥1 Mesh3d in Scene0, got {count}"
+    );
+}
+
+/// Regression for `UnapprovedPathMode`: bevy 0.19 defaults to `Forbid`, which
+/// rejects absolute paths BEFORE the loader runs (the "gray screen" bug that
+/// `load_fbx` / `dump_fbx` fix by opting into `Allow`). An absolute path —
+/// with spaces in it — must load when the app sets `UnapprovedPathMode::Allow`.
+#[test]
+fn smoke_unapproved_absolute_path_loads_when_allowed() {
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .add_plugins(AssetPlugin {
+            file_path: "assets".into(),
+            unapproved_path_mode: UnapprovedPathMode::Allow,
+            ..default()
+        })
+        .add_plugins(FbxPlugin)
+        .init_asset::<Mesh>()
+        .init_asset::<StandardMaterial>()
+        .init_asset::<Image>()
+        .init_asset::<AnimationClip>()
+        .init_asset::<SkinnedMeshInverseBindposes>()
+        .init_asset::<WorldAsset>();
+
+    // Stage an absolute copy of the cube fixture in a temp dir; the file name
+    // and folder both contain spaces (the acceptance file "Illegal Elbow
+    // Punch.fbx" has one too).
+    let src = std::path::Path::new("assets").join("cube.fbx");
+    let dir = std::env::temp_dir().join("bevy_ufbx unapproved path test");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let dst = dir.join("cube copy.fbx");
+    std::fs::copy(&src, &dst).expect("stage fixture copy");
+
+    let abs = dst.to_string_lossy().into_owned();
+    let handle: Handle<Fbx> = app.world().resource::<AssetServer>().load(abs.clone());
+    let loaded = wait_for_load(&mut app, &handle, 800);
+    let _ = std::fs::remove_file(&dst);
+    assert!(
+        loaded,
+        "absolute path outside assets/ must load under UnapprovedPathMode::Allow: {abs}"
     );
 }
 

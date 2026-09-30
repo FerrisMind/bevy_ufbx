@@ -66,6 +66,25 @@ pub fn process_materials(
     settings: &FbxLoaderSettings,
     load_context: &mut LoadContext,
 ) -> Result<ProcessedMaterials, FbxError> {
+    // Diagnostic only (no behavior change): this sync compat path never reads
+    // external image files, so every external reference becomes an asset-server
+    // handle without an existence check. If such a file is missing the image
+    // never loads, the StandardMaterial never prepares (bevy_pbr
+    // RetryNextUpdate), and its mesh silently does not render — the same
+    // observable behavior as bevy_gltf with a missing texture URI. The async
+    // loader path warns per texture in `read_external_texture_bytes`; this
+    // path previously said nothing.
+    let external_requests =
+        texture::external_texture_requests(scene, &texture::asset_base_dir(load_context));
+    if !external_requests.is_empty() {
+        warn!(
+            "FBX references {} external texture file(s); the synchronous process_materials path keeps them \
+             as asset-server handles without checking they exist. Any file that is missing leaves its \
+             StandardMaterial unprepared, so that mesh does not render until the file exists at that path \
+             (same behavior as bevy_gltf with a missing texture URI).",
+            external_requests.len()
+        );
+    }
     let textures = process_textures_internal(scene, settings, load_context)?;
     build_materials(scene, &textures, load_context)
 }
@@ -431,11 +450,11 @@ fn build_standard_material(
         material.perceptual_roughness = material_source.pbr.roughness.value_vec4.x as f32;
     }
 
-    if material_source.fbx.emission_color.has_value {
-        let emission = material_source.fbx.emission_color.value_vec4;
-        material.emissive =
-            LinearRgba::rgb(emission.x as f32, emission.y as f32, emission.z as f32);
-    }
+    apply_emission(
+        &mut material,
+        &material_source.fbx.emission_color,
+        &material_source.fbx.emission_factor,
+    );
 
     // Clearcoat / transmission / IOR when present on the ufbx PBR maps.
     apply_coat(
@@ -552,6 +571,42 @@ fn apply_coat(
         material.clearcoat = factor.value_vec4.x as f32;
         material.clearcoat_perceptual_roughness = roughness.value_vec4.x as f32;
     }
+}
+
+/// Emission color times its scalar factor, following ufbx's own semantics.
+///
+/// ufbx defines emission as `emission_color.rgb * emission_factor` (its tests
+/// assert `color->value_vec3.{x,y,z} * factor->value_vec3.x`, test_legacy.h
+/// `ufbxt_diff_material_value` used at the emission case) and defaults a
+/// missing factor to 1.0 when a color is defined (or 0.0 otherwise) via
+/// `ufbxi_update_factor`. Blender-default files author `EmissiveColor=(1,1,1)`
+/// with `EmissiveFactor=0`, which must render with *no* emission — multiplying
+/// here kills the historical white/pastel wash and matches `bevy_gltf`'s
+/// `emissive = emissiveFactor * emissiveStrength (default 1.0)` where a
+/// default material is `LinearRgba::BLACK`. The factor is not clamped: Maya
+/// "luminance" authors exceed 1.0, and glTF conversion is explicitly "willing
+/// to exceed 1.0" (bevy_gltf loader/mod.rs). A black result (color × 0) is
+/// correct — the `has_value` gate on the color is the only gate; the feature
+/// flag is not consulted (ufbx warns `enabled` alone is insufficient).
+fn apply_emission(
+    material: &mut StandardMaterial,
+    color: &ufbx::MaterialMap,
+    factor: &ufbx::MaterialMap,
+) {
+    if !color.has_value {
+        return;
+    }
+    let emission = color.value_vec4;
+    let factor = if factor.has_value {
+        factor.value_vec4.x as f32
+    } else {
+        1.0
+    };
+    material.emissive = LinearRgba::rgb(
+        emission.x as f32 * factor,
+        emission.y as f32 * factor,
+        emission.z as f32 * factor,
+    );
 }
 
 /// Specular strength and tint, mirroring how `bevy_gltf` maps
@@ -687,6 +742,92 @@ mod tests {
         apply_specular(&mut fresh, &scalar_map(1.0, true), &black);
         assert_eq!(fresh.reflectance, 0.5);
         assert_eq!(fresh.specular_tint, Color::linear_rgb(0.0, 0.0, 0.0));
+    }
+
+    /// A color-valued ufbx material map (emission/specular color style).
+    fn color_map(x: f64, y: f64, z: f64, has_value: bool) -> ufbx::MaterialMap {
+        ufbx::MaterialMap {
+            value_vec4: ufbx::Vec4 { x, y, z, w: 1.0 },
+            value_int: 0,
+            texture: None,
+            has_value,
+            texture_enabled: false,
+            feature_disabled: false,
+            value_components: 3,
+        }
+    }
+
+    /// ufbx semantics: `emission = emission_color.rgb * emission_factor`.
+    /// Blender-default files author `EmissiveColor=(1,1,1)` with
+    /// `EmissiveFactor=0` — the historical white/pastel wash case.
+    #[test]
+    fn emission_factor_zero_kills_the_wash() {
+        let mut material = StandardMaterial::default();
+        apply_emission(
+            &mut material,
+            &color_map(1.0, 1.0, 1.0, true),
+            &scalar_map(0.0, true),
+        );
+        assert_eq!(material.emissive, LinearRgba::BLACK);
+    }
+
+    /// factor 1.0 keeps the authored color at full strength.
+    #[test]
+    fn emission_factor_one_keeps_the_full_color() {
+        let mut material = StandardMaterial::default();
+        apply_emission(
+            &mut material,
+            &color_map(1.0, 1.0, 1.0, true),
+            &scalar_map(1.0, true),
+        );
+        assert_eq!(material.emissive, LinearRgba::WHITE);
+    }
+
+    /// A fractional factor scales every channel (ufbxt_diff_material_value).
+    #[test]
+    fn emission_factor_scales_the_color() {
+        let mut material = StandardMaterial::default();
+        apply_emission(
+            &mut material,
+            &color_map(0.25, 0.5, 0.75, true),
+            &scalar_map(0.5, true),
+        );
+        assert_eq!(material.emissive, LinearRgba::rgb(0.125, 0.25, 0.375));
+    }
+
+    /// ufbx defaults a missing factor to 1.0 when a color is defined
+    /// (`ufbxi_update_factor`), so an unauthored factor must not zero the
+    /// color; an unauthored *color* keeps Bevy's default-black emissive.
+    #[test]
+    fn missing_emission_factor_defaults_to_one() {
+        let mut material = StandardMaterial::default();
+        apply_emission(
+            &mut material,
+            &color_map(0.2, 0.4, 0.6, true),
+            &scalar_map(0.0, false),
+        );
+        assert_eq!(material.emissive, LinearRgba::rgb(0.2, 0.4, 0.6));
+
+        let mut untouched = StandardMaterial::default();
+        apply_emission(
+            &mut untouched,
+            &color_map(1.0, 1.0, 1.0, false),
+            &scalar_map(5.0, true),
+        );
+        assert_eq!(untouched.emissive, LinearRgba::BLACK);
+    }
+
+    /// Factors above 1.0 pass through unclamped (Maya luminance authors; glTF
+    /// conversion is "willing to exceed 1.0").
+    #[test]
+    fn emission_factor_above_one_is_unbounded() {
+        let mut material = StandardMaterial::default();
+        apply_emission(
+            &mut material,
+            &color_map(1.0, 1.0, 1.0, true),
+            &scalar_map(2.0, true),
+        );
+        assert_eq!(material.emissive, LinearRgba::rgb(2.0, 2.0, 2.0));
     }
 
     /// Anisotropy scalars apply only when ufbx marks the maps as authored;

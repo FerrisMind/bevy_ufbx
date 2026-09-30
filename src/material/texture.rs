@@ -454,7 +454,12 @@ pub(crate) async fn read_external_texture_bytes(
         if !bytes_by_id.contains_key(id) {
             warn!(
                 "External texture '{}' could not be read; keeping the asset-server reference. Opacity and \
-                 metallic/roughness packing need the pixels at load time and stay unavailable for this map.",
+                 metallic/roughness packing need the pixels at load time and stay unavailable for this map. \
+                 The consequence is a material that never renders: while the file is missing the image handle \
+                 never resolves, the StandardMaterial never prepares (bevy_pbr RetryNextUpdate), and its mesh \
+                 is not drawn — identical to bevy_gltf with a missing texture URI. The mesh appears once the \
+                 file exists at that path, or when the slot is cleared (see `settle_texture` in \
+                 examples/materials_pbr_fbx.rs).",
                 candidates.first().map(String::as_str).unwrap_or("")
             );
         }

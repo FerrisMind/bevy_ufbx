@@ -25,19 +25,37 @@
 //!
 //! Default fixture `blender_279_internal_textures_7400_binary.fbx` authors
 //! `specular_factor = 0.25` → reflectance 0.125 (distinct from Bevy's 0.5 default), so
-//! the parity is visible in stdout. NOTE: the default scale assumes this Blender cm
-//! fixture; a differently-scaled file passed on the CLI may need `DEMO_VISUAL_SCALE`
-//! adjusted to frame it.
+//! the parity is visible in stdout. The camera fits the measured content bounds
+//! (fit-to-content, printed to stdout), so any fixture passed on the CLI lands
+//! on screen at its loader scale — no hand-tuned demo scale.
 
-use std::f32::consts::PI;
+use std::f32::consts::{FRAC_PI_4, PI};
 use std::path::Path;
 
-use bevy::{light::CascadeShadowConfigBuilder, prelude::*};
+use bevy::asset::LoadState;
+use bevy::camera::primitives::Aabb;
+use bevy::light::{CascadeShadowConfig, CascadeShadowConfigBuilder};
+use bevy::prelude::*;
+use bevy::window::PrimaryWindow;
+use bevy::world_serialization::WorldInstanceReady;
 use bevy_ufbx::{FbxAssetLabel, FbxCompressedImageFormatSupport, FbxPlugin};
 
 const DEFAULT_FIXTURE: &str = "blender_279_internal_textures_7400_binary.fbx";
-/// Blender 2.79 fixture reports centimetre-ish extents after conversion — enlarge.
-const DEMO_VISUAL_SCALE: f32 = 100.0;
+/// Loader conversion puts the default fixture at metre-ish extents (fixture
+/// Aabb ±1.0 at scale 1.0) — the fit-to-content camera frames whatever loads,
+/// so the demo scale stays 1.0 for every file. (The old ×100 "cm fixture"
+/// assumption put the camera inside a 200-unit cube: backface culling then
+/// hides the model — the bug class `sampler_settings_fbx` documents.)
+const DEMO_VISUAL_SCALE: f32 = 1.0;
+
+/// Frames to poll for mesh `Aabb`s before keeping the default camera framing
+/// (`Aabb` is inserted one frame after the scene entities spawn).
+const FRAMING_TIMEOUT_FRAMES: u32 = 600;
+/// Direction of the original hard-coded camera offset — the auto-fit camera
+/// keeps this diagonal angle and derives the distance from the measured bounds.
+const VIEW_DIR: Vec3 = Vec3::new(2.5, 2.0, 4.0);
+/// Frustum margin on the fitted distance (slack for the spinning model).
+const FRAMING_MARGIN: f32 = 1.15;
 
 fn main() {
     App::new()
@@ -54,13 +72,31 @@ fn main() {
             ..default()
         }))
         .add_plugins(FbxPlugin)
+        .init_resource::<CameraFraming>()
         .add_systems(Startup, setup)
-        .add_systems(Update, (rotate, report_when_loaded))
+        .add_systems(Update, (rotate, report_when_loaded, frame_camera))
         .run();
 }
 
 #[derive(Component)]
 struct Spinning;
+
+#[derive(Component)]
+struct ViewerCamera;
+
+/// Demo ground plane — excluded from framing bounds, repositioned under the
+/// measured content by `frame_camera`.
+#[derive(Component)]
+struct Ground;
+
+/// Fit-to-content state machine: armed by the `WorldInstanceReady` observer,
+/// polled until `Aabb`s exist (or the timeout keeps the default framing).
+#[derive(Resource, Default)]
+struct CameraFraming {
+    armed: bool,
+    frames: u32,
+    done: bool,
+}
 
 /// Flags the loader gates each PBR scalar on, captured from an `ufbx` probe so the
 /// post-load print can say "authored value applied" vs "not authored → Bevy default".
@@ -113,18 +149,31 @@ fn setup(
     // `Fbx` container is not referenced by this load, so the post-load report reads
     // `Assets<StandardMaterial>` directly, paired with the ufbx probe by dense
     // `Material{N}` index — and there is no second default-settings loader pass.
-    commands.spawn((
-        WorldAssetRoot(asset_server.load(FbxAssetLabel::Scene(0).from_asset(fixture))),
-        Transform::from_scale(Vec3::splat(DEMO_VISUAL_SCALE)),
-        Spinning,
-    ));
+    commands
+        .spawn((
+            WorldAssetRoot(asset_server.load(FbxAssetLabel::Scene(0).from_asset(fixture))),
+            Transform::from_scale(Vec3::splat(DEMO_VISUAL_SCALE)),
+            Spinning,
+        ))
+        .observe(scene_ready);
 
     commands.spawn((
         Camera3d::default(),
+        ViewerCamera,
+        // near=0.01 (Bevy default is 0.1) lets the fit-to-content framing get
+        // close to tiny CLI fixtures — Bevy's reverse-infinite-Z projection
+        // keeps depth precision fine at this near/far ratio. Framing system
+        // repositions the camera once content bounds exist; this is the
+        // fallback view for the timeout path.
+        Projection::Perspective(PerspectiveProjection {
+            near: 0.01,
+            ..default()
+        }),
         Transform::from_xyz(2.5, 2.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
     commands.spawn((
+        Ground,
         Mesh3d(meshes.add(Plane3d::default().mesh().size(8.0, 8.0))),
         MeshMaterial3d(materials.add(Color::srgb(0.25, 0.28, 0.32))),
         Transform::from_xyz(0.0, -0.55, 0.0),
@@ -147,8 +196,8 @@ fn setup(
 
     commands.spawn((
         Text::new(
-            "materials_pbr_fbx — PBR scalar parity (specular / anisotropy / clearcoat)\n\
-             Look for: stdout — authored flags from the ufbx probe at startup, then the\n\
+            "materials_pbr_fbx - PBR scalar parity (specular / anisotropy / clearcoat)\n\
+             Look for in stdout: authored flags from the ufbx probe at startup, then the\n\
              resulting StandardMaterial values after load (reflectance = factor x 0.5).\n\
              Coat TEXTURE slots need --features pbr_multi_layer_material_textures\n\
              (compiled out otherwise; startup prints which variant is active).",
@@ -297,11 +346,13 @@ fn probe_authored(fixture: &str) -> AuthoredMaterials {
 }
 
 /// Print the resulting `StandardMaterial` values once the labeled sub-assets landed.
+#[allow(clippy::too_many_arguments)]
 fn report_when_loaded(
     asset_server: Res<AssetServer>,
-    materials: Res<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
     authored: Res<AuthoredMaterials>,
     mut reported: Local<bool>,
+    mut settle_frames: Local<u32>,
 ) {
     if *reported {
         return;
@@ -311,8 +362,8 @@ fn report_when_loaded(
     // handle to them), while these StandardMaterials stay alive through the
     // Scene0 WorldAsset. The floor material has no asset path; `Material{N}
     // (inverted)` twins are skipped (same scalar values, different cull).
-    let mut found: Vec<(usize, &StandardMaterial)> = Vec::new();
-    for (id, material) in materials.iter() {
+    let mut found: Vec<(usize, AssetId<StandardMaterial>)> = Vec::new();
+    for (id, _material) in materials.iter() {
         let Some(path) = asset_server.get_path(id) else {
             continue;
         };
@@ -328,15 +379,83 @@ fn report_when_loaded(
         let Ok(index) = rest[..slash].parse::<usize>() else {
             continue;
         };
-        found.push((index, material));
+        found.push((index, id));
     }
     if found.is_empty() {
         return;
     }
     found.sort_by_key(|(index, _)| *index);
 
+    // Texture settle pass: the default fixture references external
+    // `assets/textures/checkerboard_*.png` images that are NOT in this corpus.
+    // bevy_pbr leaves a material unprepared while a bound image is missing, so
+    // its mesh never renders — clear the dead slot (the base-color scalar above
+    // still demonstrates the parity) and say so on stdout; images that are
+    // still loading delay the report (bounded by 600 frames).
+    let mut pending = false;
+    let mut cleared: Vec<&'static str> = Vec::new();
+    for (_, id) in &found {
+        let Some(mut material) = materials.get_mut(*id) else {
+            continue;
+        };
+        // `AssetMut` derefs to the material; settle one field per call so the
+        // reborrows stay disjoint.
+        let slots: [(
+            &'static str,
+            fn(&mut StandardMaterial) -> &mut Option<Handle<Image>>,
+        ); 5] = [
+            ("base_color", |m| &mut m.base_color_texture),
+            ("emissive", |m| &mut m.emissive_texture),
+            ("metallic_roughness", |m| &mut m.metallic_roughness_texture),
+            ("occlusion", |m| &mut m.occlusion_texture),
+            ("normal", |m| &mut m.normal_map_texture),
+        ];
+        for (name, pick) in slots {
+            if settle_texture(&asset_server, pick(&mut material), &mut pending) {
+                cleared.push(name);
+            }
+        }
+        #[cfg(feature = "pbr_multi_layer_material_textures")]
+        {
+            let coat_slots: [(
+                &'static str,
+                fn(&mut StandardMaterial) -> &mut Option<Handle<Image>>,
+            ); 3] = [
+                ("clearcoat", |m| &mut m.clearcoat_texture),
+                ("clearcoat_roughness", |m| {
+                    &mut m.clearcoat_roughness_texture
+                }),
+                ("clearcoat_normal", |m| &mut m.clearcoat_normal_texture),
+            ];
+            for (name, pick) in coat_slots {
+                if settle_texture(&asset_server, pick(&mut material), &mut pending) {
+                    cleared.push(name);
+                }
+            }
+        }
+    }
+    if pending {
+        *settle_frames += 1;
+        if *settle_frames < 600 {
+            return;
+        }
+    }
+    if !cleared.is_empty() {
+        cleared.sort_unstable();
+        cleared.dedup();
+        println!(
+            "note: external image(s) missing from the corpus (assets/textures/...): cleared \
+             [{}] texture slot(s) so the mesh renders — the loader kept the asset-server \
+             reference (see the Path not found / WARN lines above)",
+            cleared.join(", ")
+        );
+    }
+
     println!("--- loaded StandardMaterial (label Material{{N}}/Standard → values) ---");
-    for (index, material) in found {
+    for (index, id) in found {
+        let Some(material) = materials.get(id) else {
+            continue;
+        };
         let flags = authored.flags.get(index);
         let name = authored
             .names
@@ -425,6 +544,172 @@ fn report_when_loaded(
          — run with --features pbr_multi_layer_material_textures to see coat maps"
     );
     *reported = true;
+}
+
+/// Scene instance spawned → arm the fit-to-content camera framing.
+fn scene_ready(_ready: On<WorldInstanceReady>, mut framing: ResMut<CameraFraming>) {
+    if !framing.done {
+        framing.armed = true;
+        framing.frames = 0;
+    }
+}
+
+/// Fit the camera to the measured content bounds (the `load_fbx` pattern),
+/// spin-proofed for the rotating model: the demo spins the fixture about the Y
+/// axis through the origin, so the frame is a **spin-invariant** bounding
+/// sphere around that axis (horizontal distance + height do not change as the
+/// model turns, unlike the raw union `Aabb`). Ground and shadow cascades are
+/// re-fitted from the same measurement, so any CLI fixture — metre-cube or
+/// centimetre trinket — lands framed and shadowed instead of sitting inside the
+/// camera.
+#[allow(clippy::too_many_arguments)]
+fn frame_camera(
+    mut framing: ResMut<CameraFraming>,
+    // Camera and ground both write `Transform`; `With<ViewerCamera>` /
+    // `With<Ground>` do not prove disjointness (B0001), so they share a
+    // ParamSet.
+    mut rigs: ParamSet<(
+        Query<(&mut Transform, &Projection), With<ViewerCamera>>,
+        Query<&mut Transform, With<Ground>>,
+    )>,
+    meshes: Query<(&Aabb, &GlobalTransform), (With<Mesh3d>, Without<Ground>)>,
+    mut cascades: Query<&mut CascadeShadowConfig, With<DirectionalLight>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+) {
+    if !framing.armed || framing.done {
+        return;
+    }
+    framing.frames += 1;
+
+    // Union of world-space mesh bounds (ground excluded: it is dressing, not
+    // content). `Aabb` is inserted by Bevy's calculate_bounds after spawn.
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    let mut count = 0usize;
+    for (aabb, global) in meshes.iter() {
+        let (lo, hi) = (aabb.min(), aabb.max());
+        for x in [lo.x, hi.x] {
+            for y in [lo.y, hi.y] {
+                for z in [lo.z, hi.z] {
+                    let world = global.transform_point(Vec3::new(x, y, z));
+                    min = min.min(world);
+                    max = max.max(world);
+                }
+            }
+        }
+        count += 1;
+    }
+    if count == 0 {
+        if framing.frames >= FRAMING_TIMEOUT_FRAMES {
+            framing.armed = false;
+            framing.done = true;
+            println!(
+                "[materials_pbr_fbx] no mesh bounds after {FRAMING_TIMEOUT_FRAMES} frames — \
+                 keeping default camera framing"
+            );
+        }
+        return;
+    }
+    framing.armed = false;
+    framing.done = true;
+
+    // Spin-invariant sphere about the Y axis through the origin (the `Spinning`
+    // root rotates the model about that axis).
+    let center = Vec3::new(0.0, (min.y + max.y) * 0.5, 0.0);
+    let mut radius = (max.y - min.y).abs() * 0.5;
+    for (aabb, global) in meshes.iter() {
+        let (lo, hi) = (aabb.min(), aabb.max());
+        for x in [lo.x, hi.x] {
+            for y in [lo.y, hi.y] {
+                for z in [lo.z, hi.z] {
+                    let world = global.transform_point(Vec3::new(x, y, z));
+                    radius = radius.max(Vec3::new(world.x, world.y, world.z).distance(center));
+                }
+            }
+        }
+    }
+    radius = radius.max(1e-4);
+
+    {
+        let mut ground_q = rigs.p1();
+        if let Ok(mut ground) = ground_q.single_mut() {
+            ground.translation.y = min.y - 0.06 * radius;
+            ground.scale = Vec3::splat((radius * 0.6).max(1.0));
+        }
+    }
+    if let Ok(mut cascade) = cascades.single_mut() {
+        *cascade = CascadeShadowConfigBuilder {
+            first_cascade_far_bound: (radius * 4.0).max(1.0),
+            maximum_distance: (radius * 8.0).max(2.0),
+            ..default()
+        }
+        .build();
+    }
+
+    let mut camera_q = rigs.p0();
+    let Ok((mut cam_tf, projection)) = camera_q.single_mut() else {
+        return;
+    };
+    let (v_fov, near) = match projection {
+        Projection::Perspective(p) => (p.fov, p.near),
+        _ => (FRAC_PI_4, 0.1),
+    };
+    let aspect = windows
+        .single()
+        .map(|w| {
+            let h = w.resolution.height();
+            if h > 0.0 {
+                w.resolution.width() as f32 / h as f32
+            } else {
+                1.0
+            }
+        })
+        .unwrap_or(1.0)
+        .max(0.1);
+    let h_fov = 2.0 * ((0.5 * v_fov).tan() * aspect).atan();
+    let half_angle = 0.5 * v_fov.min(h_fov);
+    let mut distance = radius / half_angle.sin() * FRAMING_MARGIN;
+    // Keep the model outside the near plane for tiny content.
+    distance = distance.max(near * 1.5 + radius);
+
+    let pos = center + VIEW_DIR.normalize() * distance;
+    *cam_tf = Transform::from_translation(pos).looking_at(center, Vec3::Y);
+
+    println!("[materials_pbr_fbx] content bounds: {count} mesh AABB(s)");
+    println!(
+        "[materials_pbr_fbx]   world min=({:.4}, {:.4}, {:.4}) max=({:.4}, {:.4}, {:.4}) \
+         center=({:.4}, {:.4}, {:.4}) radius={:.4} (spin-invariant)",
+        min.x, min.y, min.z, max.x, max.y, max.z, center.x, center.y, center.z, radius
+    );
+    println!(
+        "[materials_pbr_fbx] camera framing: distance={distance:.4} v_fov={v_fov:.4}rad \
+         aspect={aspect:.3} near={near:.4} translation=({:.4}, {:.4}, {:.4})",
+        pos.x, pos.y, pos.z
+    );
+}
+
+/// Clear a texture slot whose image failed to load (bevy_pbr would keep the
+/// material unprepared and never draw its mesh); flag `Loading` so the caller
+/// waits for a terminal state instead of reporting half-settled materials.
+fn settle_texture(
+    asset_server: &AssetServer,
+    slot: &mut Option<Handle<Image>>,
+    pending: &mut bool,
+) -> bool {
+    let Some(handle) = slot.as_ref() else {
+        return false;
+    };
+    match asset_server.load_state(handle.id()) {
+        LoadState::Failed(_) => {
+            *slot = None;
+            true
+        }
+        LoadState::Loading => {
+            *pending = true;
+            false
+        }
+        _ => false,
+    }
 }
 
 fn rotate(time: Res<Time>, mut q: Query<&mut Transform, With<Spinning>>) {

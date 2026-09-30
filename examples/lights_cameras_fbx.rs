@@ -130,8 +130,9 @@ fn setup(
     commands.spawn((
         StatusText,
         Text::new(
-            "lights_cameras_fbx — maya_camera_light_axes_y_up_6100_binary.fbx\n\
-             Waiting for Scene0 — loader activates the FBX camera; observer verifies it\n\
+            // ASCII only: Bevy's default font (FiraMono-subset) has no "—" glyph.
+            "lights_cameras_fbx - maya_camera_light_axes_y_up_6100_binary.fbx\n\
+             Waiting for Scene0 - loader activates the FBX camera; observer verifies it\n\
              and drops the app fill light. Fixture has lights+camera only (probe = Cuboid).",
         ),
         TextFont::from_font_size(17.0),
@@ -212,10 +213,10 @@ fn report_fbx_scene_ready(
 
     if let Ok(mut text) = texts.single_mut() {
         *text = Text::new(format!(
-            "lights_cameras_fbx — {LIGHTS_CAMERAS}\n\
+            "lights_cameras_fbx - {LIGHTS_CAMERAS}\n\
              FBX: {dir} Directional, {pts} Point, {spots} Spot (radius == range), \
              {cams} Camera(s); loader-activated active={active}/1.\n\
-             App fill light removed — FBX light is the key illuminant.\n\
+             App fill light removed - FBX light is the key illuminant.\n\
              Probe Cuboid remains (fixture has no mesh)."
         ));
     }

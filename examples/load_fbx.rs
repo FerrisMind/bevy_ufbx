@@ -170,7 +170,9 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
 
     commands.spawn((
         StatusText,
-        Text::new(format!("load_fbx — {path}\nLoading Scene0…")),
+        // On-screen text uses ASCII only: Bevy's default font (FiraMono-subset)
+        // lacks glyphs for "—", "…" and "×" (they render as tofu boxes).
+        Text::new(format!("load_fbx - {path}\nLoading Scene0...")),
         TextFont::from_font_size(16.0),
         TextColor(Color::srgb(0.95, 0.95, 0.9)),
         Node {
@@ -221,7 +223,7 @@ fn watch_load(
             println!("[load_fbx] Scene0 loaded OK: {}", watch.path);
             if let Ok(mut text) = texts.single_mut() {
                 *text = Text::new(format!(
-                    "load_fbx — {}\nScene0 loaded — auto-framing content bounds…",
+                    "load_fbx - {}\nScene0 loaded - auto-framing content bounds...",
                     watch.path
                 ));
             }
@@ -231,7 +233,7 @@ fn watch_load(
             print_load_error(&watch.path, &err);
             if let Ok(mut text) = texts.single_mut() {
                 *text = Text::new(format!(
-                    "load_fbx — FAILED to load {}\n(see stderr for the granular FbxError)",
+                    "load_fbx - FAILED to load {}\n(see stderr for the granular FbxError)",
                     watch.path
                 ));
             }

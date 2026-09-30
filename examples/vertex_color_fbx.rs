@@ -108,10 +108,12 @@ fn setup(
 
     commands.spawn((
         StatusText,
+        // ASCII only on screen: Bevy's default font (FiraMono-subset) has no
+        // glyphs for "—", "…" and "×" (they render as tofu boxes).
         Text::new(format!(
-            "vertex_color_fbx — {FBX_PATH}\n\
-             Look for: painted VERTEX COLORS (ATTRIBUTE_COLOR × white base).\n\
-             Waiting for Scene0…"
+            "vertex_color_fbx - {FBX_PATH}\n\
+             Look for: painted VERTEX COLORS (ATTRIBUTE_COLOR x white base).\n\
+             Waiting for Scene0..."
         )),
         TextFont::from_font_size(17.0),
         TextColor(Color::srgb(0.95, 0.95, 0.9)),
@@ -156,7 +158,7 @@ fn emphasize_vertex_colors(
     }
     if let Ok(mut text) = texts.single_mut() {
         *text = Text::new(format!(
-            "vertex_color_fbx — {FBX_PATH}\n\
+            "vertex_color_fbx - {FBX_PATH}\n\
              Look for: painted VERTEX COLORS (not a flat Lambert tint).\n\
              Mesh3d with ATTRIBUTE_COLOR: {colored}; base forced WHITE for multiply.\n\
              DEMO_VISUAL_SCALE={DEMO_VISUAL_SCALE}."

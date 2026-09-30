@@ -239,7 +239,8 @@ fn setup(
 
     commands.spawn((
         Text::new(
-            "textures_fbx — blender_279_internal_textures_7400_binary.fbx (EXTERNAL pngs)\n\
+            // ASCII only: Bevy's default font (FiraMono-subset) has no "—" glyph.
+            "textures_fbx - blender_279_internal_textures_7400_binary.fbx (EXTERNAL pngs)\n\
              Look for: checkerboard base-color on the cube (not flat grey).\n\
              Startup stdout says which source serves textures/checkerboard_*.png;\n\
              after load it reports each PNG's LoadState + bound base_color_textures.",

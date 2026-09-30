@@ -307,7 +307,7 @@ cargo run --example nurbs_fbx              # NURBS tessellated to Mesh, spinning
 cargo run --example static_mesh_fbx        # hierarchy + materials + units (Suzanne / cube)
 cargo run --example multimaterial_fbx      # material-split primitives (color regions)
 cargo run --example nested_meshes_fbx      # nested mesh hierarchy (cube/cone/ico/plane)
-cargo run --example textures_fbx           # embedded textures + wrap
+cargo run --example textures_fbx           # external PNG routing + UV sampling (white vs checkered cube)
 cargo run --example materials_pbr_fbx      # PBR scalar parity: specular reflectance, anisotropy, clearcoat
 cargo run --example sampler_settings_fbx   # texture-sampler precedence chain (4 tiers, see below)
 cargo run --example lights_cameras_fbx     # FBX DirectionalLight + activated Camera3d
@@ -337,7 +337,9 @@ Example notes for the three newest entries:
   and `FbxAssetLabel` resolution, `FbxMesh` / primitive names, scene-root components
   (`Name` / `FbxSceneName` / `FbxSceneExtras`), per-entity `Aabb`, camera `is_active` activation,
   light `range` / `radius`, `StandardMaterial` scalars and textures, `FbxExtras` blobs, and — on
-  failure — the granular `FbxError`.
+  failure — the granular `FbxError`. Section 10 runs a `FbxLoaderSettings` matrix (one knob
+  flipped per load through dedicated asset sources, measured deltas vs the default run) plus
+  `uv_transform` evidence.
 
 ## License
 

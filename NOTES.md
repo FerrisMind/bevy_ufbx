@@ -233,7 +233,8 @@ Local `assets/` (visual examples + tests):
 | `nurbs_saddle.fbx` | NURBS tessellate (`nurbs_fbx`) |
 | `rigged_triangle.fbx` | skin IBM / fallback for `skinned_mesh_fbx` |
 | `blender_279_sausage_7400_binary.fbx` | skinned character-ish + takes (`skinned_mesh_fbx`, `showcase_fbx`) |
-| `blender_279_internal_textures_7400_binary.fbx` | embedded textures + PBR scalar / sampler-precedence demos (`textures_fbx`, `materials_pbr_fbx`, `sampler_settings_fbx`) |
+| `blender_279_internal_textures_7400_binary.fbx` | external checkerboards (mesh has NO UVs) + PBR scalar / sampler-precedence demos (`textures_fbx` LEFT subject, `materials_pbr_fbx`, `sampler_settings_fbx`) |
+| `blender_293_textures_7400_binary.fbx` | external checkerboards WITH UVs — visible texture-sampling subject (`textures_fbx` RIGHT); corpus-only, served through the example's router fallback |
 | `blender_282_suzanne_7400_binary.fbx` | Blender AdjustTransforms static mesh |
 | `blender_279_nested_meshes_7400_binary.fbx` | nested mesh hierarchy (`nested_meshes_fbx`) |
 | `blender_suzanne_multimaterial_7400_binary.fbx` | material-split primitives / color regions (`multimaterial_fbx`, `showcase_fbx`) |

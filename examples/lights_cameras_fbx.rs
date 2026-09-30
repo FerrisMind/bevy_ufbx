@@ -18,6 +18,12 @@
 //! (FBX-authored attenuation, default 20.0) and mirrors it onto
 //! `SpotLight.radius` — the observer checks that invariant, nothing here
 //! writes either field.
+//!
+//! The imported camera renders the demo: it sits at the origin looking down
+//! -Z (fixture pose — stdout prints it as `[diag] camera ...`), so the probe
+//! cube is placed at z=-3 and the ground dropped to y=-0.6, inside that view.
+//! (With the subject at the origin the camera sat inside the cube and the
+//! window showed only clear color.)
 
 use std::path::Path;
 
@@ -86,6 +92,10 @@ fn setup(
         .observe(report_fbx_scene_ready);
 
     // Subject mesh — not from the light fixture (that file has no geometry).
+    // Placed IN the imported camera's view: the fixture's camera sits at the
+    // origin looking down -Z (printed as `[diag] camera ...` on spawn), so a
+    // subject at the origin put the camera INSIDE the cube — every face was a
+    // back-face, all of it culled, and the window showed only clear color.
     commands.spawn((
         LitSubject,
         Mesh3d(meshes.add(Cuboid::new(1.0, 1.0, 1.0))),
@@ -95,13 +105,15 @@ fn setup(
             metallic: 0.05,
             ..default()
         })),
-        Transform::from_xyz(0.0, 0.5, 0.0),
+        Transform::from_xyz(0.0, 0.0, -3.0),
     ));
 
+    // Ground dropped below the camera eye height (the imported camera is at
+    // y=0 — a plane through y=0 renders edge-on, i.e. invisible).
     commands.spawn((
         Mesh3d(meshes.add(Plane3d::default().mesh().size(12.0, 12.0))),
         MeshMaterial3d(materials.add(Color::srgb(0.22, 0.24, 0.26))),
-        Transform::from_xyz(0.0, 0.0, 0.0),
+        Transform::from_xyz(0.0, -0.6, 0.0),
     ));
 
     // Framing camera until the observer confirms the loader-activated FBX camera.
@@ -154,6 +166,8 @@ fn report_fbx_scene_ready(
     dir_lights: Query<&DirectionalLight>,
     point_lights: Query<&PointLight>,
     spot_lights: Query<&SpotLight>,
+    globals: Query<&GlobalTransform>,
+    projections: Query<&Projection>,
     framing: Query<Entity, With<FramingCamera>>,
     fill: Query<Entity, With<AppFillLight>>,
     mut commands: Commands,
@@ -186,6 +200,28 @@ fn report_fbx_scene_ready(
             if cam.is_active {
                 active += 1;
             }
+            // Diagnostic: where the loader-activated camera actually looks
+            // (an empty render usually means the imported pose points away
+            // from the demo subject, not a loader failure).
+            let pose = globals
+                .get(child)
+                .map(|g| {
+                    let t = g.compute_transform();
+                    let f = t.rotation * Vec3::NEG_Z;
+                    format!(
+                        "t=({:.3},{:.3},{:.3}) look_dir=({:.3},{:.3},{:.3})",
+                        t.translation.x, t.translation.y, t.translation.z, f.x, f.y, f.z
+                    )
+                })
+                .unwrap_or_else(|_| "(no GlobalTransform)".to_string());
+            let proj = projections
+                .get(child)
+                .map(|p| format!("{p:?}"))
+                .unwrap_or_else(|_| "(no Projection)".to_string());
+            info!(
+                "[diag] camera {cams}: active={} order={} clear={:?} {pose} proj={proj}",
+                cam.is_active, cam.order, cam.clear_color
+            );
         }
     }
 
